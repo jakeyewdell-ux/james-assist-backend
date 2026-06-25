@@ -1,0 +1,12 @@
+{
+  "name": "james-assist-backend",
+  "version": "1.0.0",
+  "description": "Intercom Canvas Kit backend for James Assist",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
