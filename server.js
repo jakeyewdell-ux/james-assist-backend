@@ -2,8 +2,8 @@ const express = require("express");
 
 const app = express();
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.path}`);
@@ -23,19 +23,7 @@ app.post("/intercom/initialize", (req, res) => {
         components: [
           {
             type: "text",
-            id: "james_assist_title",
-            text: "James Assist",
-            style: "header"
-          },
-          {
-            type: "text",
-            id: "james_assist_status",
-            text: "FRT Radar: Test mode"
-          },
-          {
-            type: "text",
-            id: "james_assist_message",
-            text: "This panel is working. Next step: connect Intercom conversation data."
+            text: "James Assist is connected."
           }
         ]
       }
@@ -52,13 +40,6 @@ app.post("/intercom/submit", (req, res) => {
         components: [
           {
             type: "text",
-            id: "james_assist_submit_title",
-            text: "James Assist",
-            style: "header"
-          },
-          {
-            type: "text",
-            id: "james_assist_submit_message",
             text: "Submit route is working."
           }
         ]
