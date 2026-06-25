@@ -2,8 +2,8 @@ const express = require("express");
 
 const app = express();
 
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.path}`);
@@ -14,20 +14,6 @@ app.get("/", (req, res) => {
   res.status(200).send("AgentVue is running.");
 });
 
-/**
- * AGENTVUE TARGETS
- *
- * Probation:
- * - Daily cases: 30–50/day
- * - FRT: under 15 minutes
- * - Time to first close: under 1h 20min
- * - CSAT: 65%
- *
- * Shift tracking:
- * - Counts all cases closed by James between 00:00–08:00 ICT
- * - Breaks are NOT excluded from the closed case count
- * - Counts close events, not updated_at only
- */
 const TARGETS = {
   frtSeconds: 15 * 60,
   firstCloseSeconds: 80 * 60,
@@ -52,12 +38,16 @@ function formatDuration(seconds) {
 
   if (minutes < 1) return "Under 1 min";
 
-  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 60) {
+    return `${minutes} min`;
+  }
 
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
 
-  if (remainingMinutes === 0) return `${hours}h`;
+  if (remainingMinutes === 0) {
+    return `${hours}h`;
+  }
 
   return `${hours}h ${remainingMinutes}m`;
 }
@@ -84,7 +74,7 @@ function stripHtml(input) {
     .trim();
 }
 
-function truncateText(text, maxLength = 120) {
+function truncateText(text, maxLength = 140) {
   if (!text) return "No message preview found.";
   if (text.length <= maxLength) return text;
   return `${text.substring(0, maxLength)}...`;
@@ -115,16 +105,19 @@ function getLatestConversationItem(conversation) {
     body: part.body || "",
     created_at: part.created_at,
     author: part.author || null,
-    author_type: part.author?.type || "unknown",
-    part_type: part.part_type || part.type || "unknown"
+    author_type: part.author?.type || "unknown"
   }));
 
   const items = [];
 
-  if (sourceItem?.created_at) items.push(sourceItem);
+  if (sourceItem?.created_at) {
+    items.push(sourceItem);
+  }
 
   for (const part of parts) {
-    if (part.created_at) items.push(part);
+    if (part.created_at) {
+      items.push(part);
+    }
   }
 
   if (items.length === 0) return null;
@@ -369,8 +362,7 @@ function detectTopic(text) {
     lower.includes("withdraw") ||
     lower.includes("payment") ||
     lower.includes("paid") ||
-    lower.includes("bank") ||
-    lower.includes("masspay")
+    lower.includes("bank")
   ) {
     return "Payments / payouts";
   }
@@ -379,9 +371,7 @@ function detectTopic(text) {
     lower.includes("verify") ||
     lower.includes("verification") ||
     lower.includes("id") ||
-    lower.includes("document") ||
-    lower.includes("impersonating") ||
-    lower.includes("hacked")
+    lower.includes("document")
   ) {
     return "Verification";
   }
@@ -418,15 +408,13 @@ function detectTopic(text) {
 }
 
 function getTopicSuggestion(topic, frt, firstClose) {
-  if (frt.risk === "High") return "Reply immediately to protect FRT.";
+  if (frt.risk === "High") return "Reply now to protect FRT.";
   if (firstClose.risk === "High") return "Prioritise resolution or close if solved.";
-
   if (topic === "Payments / payouts") return "Check payout/payment status.";
-  if (topic === "Verification") return "Check verification status and document guidance.";
+  if (topic === "Verification") return "Check verification guidance.";
   if (topic === "Billing / subscription") return "Check billing/subscription context.";
-  if (topic === "Account access") return "Check account status and access history.";
-  if (topic === "Content / uploads") return "Check content/upload context.";
-
+  if (topic === "Account access") return "Check account/access history.";
+  if (topic === "Content / uploads") return "Check upload/moderation context.";
   return "Review and use the relevant support process.";
 }
 
@@ -462,7 +450,7 @@ function buildSuggestedReply(topic, latestCustomerMessage, frt) {
   return "Hey there, thanks so much for reaching out! I’ll take a look into this for you now and help get this sorted. 💚";
 }
 
-function buildFTRAcknowledgement(topic, frt) {
+function buildFTRAcknowledgement(topic, frt, currentWait) {
   if (frt.risk === "High") {
     return "Hey there, thanks so much for waiting. I’m really sorry for the delay here — I’m checking this for you now and will help as quickly as possible. 💚";
   }
@@ -665,6 +653,20 @@ function calculateShiftElapsed(window) {
   };
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function fetchIntercomConversation(conversationId) {
   const token = process.env.INTERCOM_ACCESS_TOKEN;
 
@@ -672,7 +674,7 @@ async function fetchIntercomConversation(conversationId) {
     throw new Error("Missing INTERCOM_ACCESS_TOKEN environment variable");
   }
 
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://api.intercom.io/conversations/${conversationId}`,
     {
       method: "GET",
@@ -681,7 +683,8 @@ async function fetchIntercomConversation(conversationId) {
         Accept: "application/json",
         "Intercom-Version": "2.11"
       }
-    }
+    },
+    6000
   );
 
   if (!response.ok) {
@@ -692,26 +695,21 @@ async function fetchIntercomConversation(conversationId) {
   return response.json();
 }
 
-async function searchCandidateConversationsForShift(shiftStart, shiftEnd) {
+async function searchClosedCasesThisShift(shiftStart, shiftEnd) {
   const token = process.env.INTERCOM_ACCESS_TOKEN;
+  const adminId = process.env.JAMES_ADMIN_ID;
 
   if (!token) {
     throw new Error("Missing INTERCOM_ACCESS_TOKEN environment variable");
   }
 
-  const all = [];
-  let startingAfter = null;
+  if (!adminId) {
+    throw new Error("Missing JAMES_ADMIN_ID environment variable");
+  }
 
-  for (let page = 0; page < 5; page += 1) {
-    const pagination = {
-      per_page: 100
-    };
-
-    if (startingAfter) {
-      pagination.starting_after = startingAfter;
-    }
-
-    const response = await fetch("https://api.intercom.io/conversations/search", {
+  const response = await fetchWithTimeout(
+    "https://api.intercom.io/conversations/search",
+    {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -724,128 +722,45 @@ async function searchCandidateConversationsForShift(shiftStart, shiftEnd) {
           operator: "AND",
           value: [
             {
+              field: "state",
+              operator: "=",
+              value: "closed"
+            },
+            {
+              field: "admin_assignee_id",
+              operator: "=",
+              value: String(adminId)
+            },
+            {
               field: "updated_at",
               operator: ">",
-              value: shiftStart - 2 * 60 * 60
+              value: shiftStart
             },
             {
               field: "updated_at",
               operator: "<",
-              value: shiftEnd + 2 * 60 * 60
+              value: shiftEnd
             }
           ]
         },
-        pagination
+        pagination: {
+          per_page: 100
+        }
       })
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Intercom shift search error ${response.status}: ${errorText}`);
-    }
-
-    const data = await response.json();
-    const conversations = data.conversations || [];
-
-    all.push(...conversations);
-
-    const nextPage = data.pages?.next;
-    const nextStartingAfter = nextPage?.starting_after;
-
-    if (!nextStartingAfter) break;
-
-    startingAfter = nextStartingAfter;
-  }
-
-  return all;
-}
-
-function isJamesAdmin(author) {
-  const jamesAdminId = String(process.env.JAMES_ADMIN_ID || "");
-
-  if (!jamesAdminId || !author) return false;
-
-  return String(author.id || "") === jamesAdminId;
-}
-
-function getJamesCloseEvents(conversation) {
-  const parts = getAllConversationParts(conversation);
-
-  return parts.filter((part) => {
-    const type = String(part.part_type || part.type || "").toLowerCase();
-
-    const looksLikeClose =
-      type.includes("close") ||
-      type === "conversation_closed" ||
-      type === "closed";
-
-    return (
-      looksLikeClose &&
-      part.created_at &&
-      isJamesAdmin(part.author)
-    );
-  });
-}
-
-function getFallbackCloseTimeIfLikelyJames(conversation) {
-  const jamesAdminId = String(process.env.JAMES_ADMIN_ID || "");
-  const assignedAdminId = String(conversation.admin_assignee_id || "");
-
-  if (!jamesAdminId || assignedAdminId !== jamesAdminId) {
-    return null;
-  }
-
-  return (
-    conversation.statistics?.last_close_at ||
-    conversation.statistics?.first_close_at ||
-    conversation.closed_at ||
-    null
+    },
+    6000
   );
-}
 
-async function countJamesClosedCasesThisShift(shiftStart, shiftEnd) {
-  const candidates = await searchCandidateConversationsForShift(shiftStart, shiftEnd);
-  const countedConversationIds = new Set();
-
-  for (const item of candidates) {
-    const conversationId = item.id;
-
-    if (!conversationId) continue;
-
-    let fullConversation;
-
-    try {
-      fullConversation = await fetchIntercomConversation(conversationId);
-    } catch (error) {
-      console.error(`Could not fetch conversation ${conversationId}:`, error.message);
-      continue;
-    }
-
-    const closeEvents = getJamesCloseEvents(fullConversation);
-
-    const jamesClosedInsideShift = closeEvents.some((event) => {
-      return event.created_at >= shiftStart && event.created_at < shiftEnd;
-    });
-
-    if (jamesClosedInsideShift) {
-      countedConversationIds.add(conversationId);
-      continue;
-    }
-
-    const fallbackCloseTime = getFallbackCloseTimeIfLikelyJames(fullConversation);
-
-    if (
-      fallbackCloseTime &&
-      fallbackCloseTime >= shiftStart &&
-      fallbackCloseTime < shiftEnd
-    ) {
-      countedConversationIds.add(conversationId);
-    }
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Intercom shift search error ${response.status}: ${errorText}`);
   }
+
+  const data = await response.json();
 
   return {
-    count: countedConversationIds.size,
-    ids: Array.from(countedConversationIds)
+    count: data.total_count || data.conversations?.length || 0,
+    raw: data
   };
 }
 
@@ -854,7 +769,7 @@ async function calculateShiftCases() {
     const window = getShiftWindowICT();
     const elapsed = calculateShiftElapsed(window);
 
-    const result = await countJamesClosedCasesThisShift(
+    const result = await searchClosedCasesThisShift(
       window.shiftStart,
       Math.min(window.now, window.shiftEnd)
     );
@@ -904,7 +819,6 @@ async function calculateShiftCases() {
     return {
       available: true,
       count: closedCount,
-      countedIds: result.ids,
       shiftStatus: elapsed.shiftStatus,
       shiftLabel: window.label,
       elapsedText: elapsed.elapsedText,
@@ -930,6 +844,14 @@ async function calculateShiftCases() {
   }
 }
 
+function getShiftPlaceholder() {
+  return {
+    available: false,
+    isPlaceholder: true,
+    error: "Click Refresh shift cases to load 00:00–08:00 ICT case count."
+  };
+}
+
 async function sendIntercomReply(conversationId, body) {
   const token = process.env.INTERCOM_ACCESS_TOKEN;
   const adminId = process.env.JAMES_ADMIN_ID;
@@ -942,7 +864,7 @@ async function sendIntercomReply(conversationId, body) {
     throw new Error("Missing JAMES_ADMIN_ID environment variable");
   }
 
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://api.intercom.io/conversations/${conversationId}/reply`,
     {
       method: "POST",
@@ -958,7 +880,8 @@ async function sendIntercomReply(conversationId, body) {
         admin_id: String(adminId),
         body
       })
-    }
+    },
+    6000
   );
 
   if (!response.ok) {
@@ -1084,16 +1007,15 @@ function getSubmittedComponentId(body) {
   );
 }
 
-async function buildConversationData(conversationId) {
+async function buildConversationData(conversationId, options = {}) {
+  const includeShift = options.includeShift === true;
+
   const conversation = await fetchIntercomConversation(conversationId);
 
   const frt = calculateFRT(conversation);
   const firstClose = calculateFirstClose(conversation);
   const currentWait = getCurrentCustomerWait(conversation);
-  const shift = {
-  available: false,
-  error: "Shift tracker temporarily disabled to keep AgentVue loading quickly."
-  };
+  const shift = includeShift ? await calculateShiftCases() : getShiftPlaceholder();
 
   const latestCustomerMessage = getLatestCustomerMessage(conversation);
   const detectedTopic = detectTopic(latestCustomerMessage);
@@ -1148,10 +1070,18 @@ async function buildConversationData(conversationId) {
 
 function renderShiftSummary(shift) {
   if (!shift || !shift.available) {
+    const message = shift?.isPlaceholder
+      ? "📊 Shift: click Refresh shift cases"
+      : "📊 Shift: unavailable";
+
     return [
       {
         type: "text",
-        text: `📊 Shift: unavailable — ${shift?.error || "Unknown error"}`
+        text: message
+      },
+      {
+        type: "text",
+        text: shift?.error || "Could not load shift case count."
       }
     ];
   }
@@ -1159,11 +1089,19 @@ function renderShiftSummary(shift) {
   return [
     {
       type: "text",
-      text: `📊 Cases: ${shift.paceIcon} ${shift.count}/${TARGETS.dailyCasesMin} · ${shift.paceStatus}`
+      text: `📊 Shift: ${shift.paceIcon} ${shift.count}/${TARGETS.dailyCasesMin} cases · ${shift.paceStatus}`
     },
     {
       type: "text",
-      text: `Expected: ${shift.expectedMinByNow}–${shift.expectedMaxByNow} · Left: ${shift.remainingForMinTarget} · Pace: ${formatCasesPerHour(shift.requiredPaceMin)}`
+      text: `Expected: ${shift.expectedMinByNow}–${shift.expectedMaxByNow} · Needed: ${shift.remainingForMinTarget} for 30`
+    },
+    {
+      type: "text",
+      text: `Window: ${shift.shiftLabel} · Time: ${shift.elapsedText}/${shift.totalText}`
+    },
+    {
+      type: "text",
+      text: `Required pace: ${formatCasesPerHour(shift.requiredPaceMin)} for 30 · ${formatCasesPerHour(shift.requiredPaceMax)} for 50`
     }
   ];
 }
@@ -1172,16 +1110,21 @@ function renderMainPanel(data, teammateName, conversationId) {
   return buildCanvas([
     {
       type: "text",
-      text: "AgentVue",
+      text: "Overview",
       style: "header"
     },
+
     {
       type: "text",
       text: `${data.priority.label} — ${data.priority.summary}`
     },
     {
       type: "text",
-      text: `🎯 ${data.metricScore} · ${data.recommendedAction}`
+      text: `🎯 Score: ${data.metricScore}`
+    },
+    {
+      type: "text",
+      text: `⚡ ${data.recommendedAction}`
     },
 
     {
@@ -1190,6 +1133,16 @@ function renderMainPanel(data, teammateName, conversationId) {
     },
 
     ...renderShiftSummary(data.shift),
+
+    {
+      type: "button",
+      id: "refresh_shift_cases",
+      label: "Refresh shift cases",
+      style: "secondary",
+      action: {
+        type: "submit"
+      }
+    },
 
     {
       type: "text",
@@ -1239,7 +1192,7 @@ function renderMainPanel(data, teammateName, conversationId) {
     {
       type: "button",
       id: "refresh_metrics",
-      label: "Refresh",
+      label: "Refresh conversation",
       style: "secondary",
       action: {
         type: "submit"
@@ -1261,16 +1214,12 @@ function renderAckSentPanel(data, teammateName, conversationId) {
   return buildCanvas([
     {
       type: "text",
-      text: "AgentVue",
+      text: "FRT acknowledgement",
       style: "header"
     },
     {
       type: "text",
-      text: "✅ FRT acknowledgement sent"
-    },
-    {
-      type: "text",
-      text: `Sent as James admin ID: ${process.env.JAMES_ADMIN_ID}`
+      text: "✅ Sent successfully"
     },
     {
       type: "text",
@@ -1279,7 +1228,7 @@ function renderAckSentPanel(data, teammateName, conversationId) {
     {
       type: "button",
       id: "refresh_metrics",
-      label: "Refresh",
+      label: "Back to overview",
       style: "secondary",
       action: {
         type: "submit"
@@ -1296,12 +1245,12 @@ function renderAckBlockedPanel(reason, conversationId) {
   return buildCanvas([
     {
       type: "text",
-      text: "AgentVue",
+      text: "FRT acknowledgement",
       style: "header"
     },
     {
       type: "text",
-      text: "⚠️ Acknowledgement not sent"
+      text: "⚠️ Not sent"
     },
     {
       type: "text",
@@ -1314,7 +1263,7 @@ function renderAckBlockedPanel(reason, conversationId) {
     {
       type: "button",
       id: "refresh_metrics",
-      label: "Back to metrics",
+      label: "Back to overview",
       style: "secondary",
       action: {
         type: "submit"
@@ -1340,7 +1289,7 @@ async function renderAgentVue(req, res) {
       buildCanvas([
         {
           type: "text",
-          text: "AgentVue",
+          text: "Overview",
           style: "header"
         },
         {
@@ -1356,7 +1305,8 @@ async function renderAgentVue(req, res) {
   }
 
   try {
-    const data = await buildConversationData(conversationId);
+    const includeShift = componentId === "refresh_shift_cases";
+    const data = await buildConversationData(conversationId, { includeShift });
 
     if (componentId === "send_frt_ack") {
       const safety = canSendFTRAck(data.conversation, data);
@@ -1384,7 +1334,7 @@ async function renderAgentVue(req, res) {
       buildCanvas([
         {
           type: "text",
-          text: "AgentVue",
+          text: "Overview",
           style: "header"
         },
         {
