@@ -29,6 +29,31 @@ function formatMinutes(seconds) {
   return `${hours}h ${remainingMinutes}m`;
 }
 
+function stripHtml(input) {
+  if (!input) return "";
+
+  return String(input)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncateText(text, maxLength = 220) {
+  if (!text) return "No message preview found.";
+
+  if (text.length <= maxLength) return text;
+
+  return `${text.substring(0, maxLength)}...`;
+}
+
 function calculateFRT(conversation) {
   const now = Math.floor(Date.now() / 1000);
 
@@ -132,6 +157,105 @@ function getPriority(frt) {
   return "Unknown";
 }
 
+function getLatestCustomerMessage(conversation) {
+  const parts = conversation.conversation_parts?.conversation_parts || [];
+
+  const customerParts = parts.filter((part) => {
+    return part.author?.type === "user" || part.author?.type === "lead";
+  });
+
+  const latestPart = customerParts[customerParts.length - 1];
+
+  const sourceBody =
+    latestPart?.body ||
+    conversation.source?.body ||
+    conversation.source?.subject ||
+    "";
+
+  return truncateText(stripHtml(sourceBody));
+}
+
+function detectTopic(text) {
+  const lower = text.toLowerCase();
+
+  if (
+    lower.includes("payout") ||
+    lower.includes("withdraw") ||
+    lower.includes("payment") ||
+    lower.includes("paid") ||
+    lower.includes("bank")
+  ) {
+    return "Payments / payouts";
+  }
+
+  if (
+    lower.includes("verify") ||
+    lower.includes("verification") ||
+    lower.includes("id") ||
+    lower.includes("document")
+  ) {
+    return "Verification";
+  }
+
+  if (
+    lower.includes("subscription") ||
+    lower.includes("cancel") ||
+    lower.includes("refund") ||
+    lower.includes("charged") ||
+    lower.includes("billing")
+  ) {
+    return "Billing / subscription";
+  }
+
+  if (
+    lower.includes("login") ||
+    lower.includes("password") ||
+    lower.includes("access") ||
+    lower.includes("account")
+  ) {
+    return "Account access";
+  }
+
+  if (
+    lower.includes("content") ||
+    lower.includes("post") ||
+    lower.includes("upload") ||
+    lower.includes("video")
+  ) {
+    return "Content / uploads";
+  }
+
+  return "General support";
+}
+
+function getTopicSuggestion(topic, frt) {
+  if (frt.risk === "High") {
+    return "Prioritise this now because FRT is at risk.";
+  }
+
+  if (topic === "Payments / payouts") {
+    return "Check payout/payment status before replying.";
+  }
+
+  if (topic === "Verification") {
+    return "Check verification status and required document guidance.";
+  }
+
+  if (topic === "Billing / subscription") {
+    return "Check billing, charge, subscription, or refund context.";
+  }
+
+  if (topic === "Account access") {
+    return "Check account status and access history before replying.";
+  }
+
+  if (topic === "Content / uploads") {
+    return "Check content/upload status and any moderation context.";
+  }
+
+  return "Review the conversation and reply using the relevant support process.";
+}
+
 async function fetchIntercomConversation(conversationId) {
   const token = process.env.INTERCOM_ACCESS_TOKEN;
 
@@ -207,6 +331,10 @@ app.post("/intercom/initialize", async (req, res) => {
     const priority = getPriority(frt);
     const recommendedAction = getRecommendedAction(conversation, frt);
 
+    const latestCustomerMessage = getLatestCustomerMessage(conversation);
+    const detectedTopic = detectTopic(latestCustomerMessage);
+    const topicSuggestion = getTopicSuggestion(detectedTopic, frt);
+
     const assignee =
       conversation.admin_assignee_id ||
       conversation.team_assignee_id ||
@@ -239,6 +367,18 @@ app.post("/intercom/initialize", async (req, res) => {
             {
               type: "text",
               text: `Waiting time: ${frt.waitingText}`
+            },
+            {
+              type: "text",
+              text: `Detected topic: ${detectedTopic}`
+            },
+            {
+              type: "text",
+              text: `Topic suggestion: ${topicSuggestion}`
+            },
+            {
+              type: "text",
+              text: `Latest customer message: ${latestCustomerMessage}`
             },
             {
               type: "text",
