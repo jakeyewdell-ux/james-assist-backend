@@ -83,26 +83,82 @@ function getAllConversationParts(conversation) {
   return conversation.conversation_parts?.conversation_parts || [];
 }
 
+function getSourceItem(conversation) {
+  if (!conversation.source) return null;
+
+  return {
+    body: conversation.source.body || conversation.source.subject || "",
+    created_at: conversation.created_at,
+    author: conversation.source.author || null,
+    author_type:
+      conversation.source.author?.type ||
+      conversation.source.type ||
+      "user"
+  };
+}
+
+function getLatestConversationItem(conversation) {
+  const sourceItem = getSourceItem(conversation);
+  const parts = getAllConversationParts(conversation).map((part) => ({
+    body: part.body || "",
+    created_at: part.created_at,
+    author: part.author || null,
+    author_type: part.author?.type || "unknown"
+  }));
+
+  const items = [];
+
+  if (sourceItem?.created_at) {
+    items.push(sourceItem);
+  }
+
+  for (const part of parts) {
+    if (part.created_at) {
+      items.push(part);
+    }
+  }
+
+  if (items.length === 0) return null;
+
+  return items.sort((a, b) => a.created_at - b.created_at)[items.length - 1];
+}
+
 function getLatestCustomerPart(conversation) {
+  const items = [];
+
+  const sourceItem = getSourceItem(conversation);
+  if (
+    sourceItem?.created_at &&
+    (sourceItem.author_type === "user" ||
+      sourceItem.author_type === "lead" ||
+      sourceItem.author_type === "contact")
+  ) {
+    items.push(sourceItem);
+  }
+
   const parts = getAllConversationParts(conversation);
 
-  const customerParts = parts.filter((part) => {
-    return part.author?.type === "user" || part.author?.type === "lead";
-  });
+  for (const part of parts) {
+    const authorType = part.author?.type;
 
-  if (customerParts.length > 0) {
-    return customerParts[customerParts.length - 1];
+    if (
+      part.created_at &&
+      (authorType === "user" ||
+        authorType === "lead" ||
+        authorType === "contact")
+    ) {
+      items.push({
+        body: part.body || "",
+        created_at: part.created_at,
+        author: part.author || null,
+        author_type: authorType
+      });
+    }
   }
 
-  if (conversation.source?.body || conversation.source?.subject) {
-    return {
-      body: conversation.source?.body || conversation.source?.subject,
-      created_at: conversation.created_at,
-      author: conversation.source?.author
-    };
-  }
+  if (items.length === 0) return null;
 
-  return null;
+  return items.sort((a, b) => a.created_at - b.created_at)[items.length - 1];
 }
 
 function getLatestCustomerMessage(conversation) {
@@ -382,10 +438,6 @@ function buildSuggestedReply(topic, latestCustomerMessage, frt) {
 }
 
 function buildFTRAcknowledgement(topic, frt, currentWait) {
-  if (frt.done) {
-    return "Hey there, thanks so much for your patience! I’m checking this for you now and will help get this sorted as quickly as possible. 💚";
-  }
-
   if (frt.risk === "High") {
     return "Hey there, thanks so much for waiting. I’m really sorry for the delay here — I’m checking this for you now and will help as quickly as possible. 💚";
   }
@@ -400,6 +452,18 @@ function buildFTRAcknowledgement(topic, frt, currentWait) {
 
   if (topic === "Verification") {
     return "Hey there, thanks so much for reaching out! I’m checking the verification details for you now and will help confirm the next steps. 💚";
+  }
+
+  if (topic === "Billing / subscription") {
+    return "Hey there, thanks so much for reaching out! I’m checking the billing/subscription details for you now and will help get this looked into. 💚";
+  }
+
+  if (topic === "Account access") {
+    return "Hey there, thanks so much for reaching out! I’m checking the account access details for you now and will help with the next steps. 💚";
+  }
+
+  if (topic === "Content / uploads") {
+    return "Hey there, thanks so much for reaching out! I’m checking the content/upload details for you now and will help get this looked into. 💚";
   }
 
   return "Hey there, thanks so much for reaching out! I’m checking this for you now and will help get this sorted. 💚";
@@ -523,6 +587,122 @@ async function fetchIntercomConversation(conversationId) {
   }
 
   return response.json();
+}
+
+async function sendIntercomReply(conversationId, body) {
+  const token = process.env.INTERCOM_ACCESS_TOKEN;
+  const adminId = process.env.JAMES_ADMIN_ID;
+
+  if (!token) {
+    throw new Error("Missing INTERCOM_ACCESS_TOKEN environment variable");
+  }
+
+  if (!adminId) {
+    throw new Error("Missing JAMES_ADMIN_ID environment variable");
+  }
+
+  const response = await fetch(
+    `https://api.intercom.io/conversations/${conversationId}/reply`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Intercom-Version": "2.11"
+      },
+      body: JSON.stringify({
+        message_type: "comment",
+        type: "admin",
+        admin_id: String(adminId),
+        body
+      })
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Intercom reply error ${response.status}: ${errorText}`);
+  }
+
+  return response.json();
+}
+
+function canSendFTRAck(conversation, data) {
+  const jamesAdminId = String(process.env.JAMES_ADMIN_ID || "");
+  const assignedAdminId = String(conversation.admin_assignee_id || "");
+
+  if (!jamesAdminId) {
+    return {
+      allowed: false,
+      reason: "JAMES_ADMIN_ID is missing in Render."
+    };
+  }
+
+  if (conversation.state === "closed") {
+    return {
+      allowed: false,
+      reason: "Conversation is closed."
+    };
+  }
+
+  if (conversation.open !== true) {
+    return {
+      allowed: false,
+      reason: "Conversation is not open."
+    };
+  }
+
+  if (assignedAdminId !== jamesAdminId) {
+    return {
+      allowed: false,
+      reason: `Conversation is not assigned to James. Current assignee ID: ${assignedAdminId || "unknown"}`
+    };
+  }
+
+  const latestItem = getLatestConversationItem(conversation);
+
+  if (!latestItem) {
+    return {
+      allowed: false,
+      reason: "No latest conversation message found."
+    };
+  }
+
+  const latestAuthorType = latestItem.author_type;
+
+  if (
+    latestAuthorType !== "user" &&
+    latestAuthorType !== "lead" &&
+    latestAuthorType !== "contact"
+  ) {
+    return {
+      allowed: false,
+      reason: `Latest message is not from a customer. Latest author type: ${latestAuthorType}`
+    };
+  }
+
+  const parts = getAllConversationParts(conversation);
+  const ackText = stripHtml(data.frtAcknowledgement).toLowerCase();
+
+  const duplicateAck = parts.some((part) => {
+    const authorType = part.author?.type;
+    const body = stripHtml(part.body || "").toLowerCase();
+
+    return authorType === "admin" && body.includes(ackText.slice(0, 60));
+  });
+
+  if (duplicateAck) {
+    return {
+      allowed: false,
+      reason: "This acknowledgement appears to have already been sent."
+    };
+  }
+
+  return {
+    allowed: true,
+    reason: "Safe to send acknowledgement."
+  };
 }
 
 function buildCanvas(components) {
@@ -697,8 +877,8 @@ function renderMainPanel(data, teammateName, conversationId) {
 
     {
       type: "button",
-      id: "prepare_frt_ack",
-      label: "Prepare FRT acknowledgement",
+      id: "send_frt_ack",
+      label: "Send FRT acknowledgement",
       style: "primary",
       action: {
         type: "submit"
@@ -737,12 +917,12 @@ function renderMainPanel(data, teammateName, conversationId) {
     },
     {
       type: "text",
-      text: "Safe mode: read-only. Nothing is sent or changed."
+      text: "Safety: sends only if open, assigned to James, and latest message is from customer."
     }
   ]);
 }
 
-function renderPreparedAckPanel(data, teammateName, conversationId) {
+function renderAckSentPanel(data, teammateName, conversationId) {
   return buildCanvas([
     {
       type: "text",
@@ -751,31 +931,15 @@ function renderPreparedAckPanel(data, teammateName, conversationId) {
     },
     {
       type: "text",
-      text: "✅ FRT acknowledgement prepared"
+      text: "✅ FRT acknowledgement sent"
     },
     {
       type: "text",
-      text: "This has NOT been sent. Copy it manually if you want to use it."
+      text: `Sent as James admin ID: ${process.env.JAMES_ADMIN_ID}`
     },
     {
       type: "text",
-      text: "—"
-    },
-    {
-      type: "text",
-      text: `💬 Acknowledgement: ${data.frtAcknowledgement}`
-    },
-    {
-      type: "text",
-      text: `🧭 Topic: ${data.detectedTopic}`
-    },
-    {
-      type: "text",
-      text: `⏱ FRT: ${data.frt.status}`
-    },
-    {
-      type: "text",
-      text: `👤 Current customer wait: ${data.currentWait.text}`
+      text: `Message: ${data.frtAcknowledgement}`
     },
     {
       type: "text",
@@ -784,7 +948,7 @@ function renderPreparedAckPanel(data, teammateName, conversationId) {
     {
       type: "button",
       id: "refresh_metrics",
-      label: "Back to metrics",
+      label: "Refresh metrics",
       style: "secondary",
       action: {
         type: "submit"
@@ -797,10 +961,41 @@ function renderPreparedAckPanel(data, teammateName, conversationId) {
     {
       type: "text",
       text: `Conversation: ${conversationId}`
+    }
+  ]);
+}
+
+function renderAckBlockedPanel(reason, conversationId) {
+  return buildCanvas([
+    {
+      type: "text",
+      text: "James Assist",
+      style: "header"
     },
     {
       type: "text",
-      text: "Safe mode: read-only. Nothing is sent or changed."
+      text: "⚠️ Acknowledgement not sent"
+    },
+    {
+      type: "text",
+      text: reason
+    },
+    {
+      type: "text",
+      text: "No message was sent or changed."
+    },
+    {
+      type: "button",
+      id: "refresh_metrics",
+      label: "Back to metrics",
+      style: "secondary",
+      action: {
+        type: "submit"
+      }
+    },
+    {
+      type: "text",
+      text: `Conversation: ${conversationId}`
     }
   ]);
 }
@@ -836,9 +1031,19 @@ async function renderJamesAssist(req, res) {
   try {
     const data = await buildConversationData(conversationId);
 
-    if (componentId === "prepare_frt_ack") {
+    if (componentId === "send_frt_ack") {
+      const safety = canSendFTRAck(data.conversation, data);
+
+      if (!safety.allowed) {
+        return res.status(200).json(
+          renderAckBlockedPanel(safety.reason, conversationId)
+        );
+      }
+
+      await sendIntercomReply(conversationId, data.frtAcknowledgement);
+
       return res.status(200).json(
-        renderPreparedAckPanel(data, teammateName, conversationId)
+        renderAckSentPanel(data, teammateName, conversationId)
       );
     }
 
@@ -857,7 +1062,7 @@ async function renderJamesAssist(req, res) {
         },
         {
           type: "text",
-          text: "🔴 Connected, but could not fetch Intercom conversation details yet."
+          text: "🔴 Something went wrong."
         },
         {
           type: "text",
@@ -869,7 +1074,7 @@ async function renderJamesAssist(req, res) {
         },
         {
           type: "text",
-          text: "Check INTERCOM_ACCESS_TOKEN and Read conversations permission."
+          text: "Check Write conversations permission, INTERCOM_ACCESS_TOKEN, and JAMES_ADMIN_ID."
         }
       ])
     );
