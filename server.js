@@ -381,6 +381,30 @@ function buildSuggestedReply(topic, latestCustomerMessage, frt) {
   return "Hey there, thanks so much for reaching out! I’ll take a look into this for you now and help get this sorted. 💚";
 }
 
+function buildFTRAcknowledgement(topic, frt, currentWait) {
+  if (frt.done) {
+    return "Hey there, thanks so much for your patience! I’m checking this for you now and will help get this sorted as quickly as possible. 💚";
+  }
+
+  if (frt.risk === "High") {
+    return "Hey there, thanks so much for waiting. I’m really sorry for the delay here — I’m checking this for you now and will help as quickly as possible. 💚";
+  }
+
+  if (frt.risk === "Medium") {
+    return "Hey there, thanks so much for reaching out! I’m taking a look into this for you now and will help get this checked as quickly as possible. 💚";
+  }
+
+  if (topic === "Payments / payouts") {
+    return "Hey there, thanks so much for reaching out! I’m checking the payout/payment details for you now and will help get this looked into as quickly as possible. 💚";
+  }
+
+  if (topic === "Verification") {
+    return "Hey there, thanks so much for reaching out! I’m checking the verification details for you now and will help confirm the next steps. 💚";
+  }
+
+  return "Hey there, thanks so much for reaching out! I’m checking this for you now and will help get this sorted. 💚";
+}
+
 function buildAdminNote(topic, latestCustomerMessage) {
   const today = new Date().toISOString().slice(0, 10);
   return `${today} JY: Customer contacted support. Detected topic: ${topic}. Latest message preview: ${latestCustomerMessage}`;
@@ -511,22 +535,283 @@ function buildCanvas(components) {
   };
 }
 
+function getConversationIdFromBody(body) {
+  return (
+    body.conversation?.id ||
+    body.context?.conversation_id ||
+    body.conversation_id ||
+    null
+  );
+}
+
+function getTeammateNameFromBody(body) {
+  return (
+    body.admin?.name ||
+    body.teammate?.name ||
+    body.context?.admin_name ||
+    "Unknown teammate"
+  );
+}
+
+function getSubmittedComponentId(body) {
+  return (
+    body.component_id ||
+    body.component?.id ||
+    body.input_values?.component_id ||
+    body.context?.component_id ||
+    null
+  );
+}
+
+async function buildConversationData(conversationId) {
+  const conversation = await fetchIntercomConversation(conversationId);
+
+  const frt = calculateFRT(conversation);
+  const firstClose = calculateFirstClose(conversation);
+  const currentWait = getCurrentCustomerWait(conversation);
+
+  const latestCustomerMessage = getLatestCustomerMessage(conversation);
+  const detectedTopic = detectTopic(latestCustomerMessage);
+  const topicSuggestion = getTopicSuggestion(detectedTopic, frt, firstClose);
+
+  const priority = getPriority(frt, firstClose, currentWait, conversation);
+  const recommendedAction = getRecommendedAction(
+    conversation,
+    frt,
+    firstClose,
+    currentWait
+  );
+
+  const suggestedReply = buildSuggestedReply(
+    detectedTopic,
+    latestCustomerMessage,
+    frt
+  );
+
+  const frtAcknowledgement = buildFTRAcknowledgement(
+    detectedTopic,
+    frt,
+    currentWait
+  );
+
+  const adminNote = buildAdminNote(detectedTopic, latestCustomerMessage);
+
+  const state = conversation.state || "Unknown";
+  const open = conversation.open === true ? "Open" : "Not open";
+  const metricScore = getMetricScore(frt, firstClose);
+
+  return {
+    conversation,
+    frt,
+    firstClose,
+    currentWait,
+    latestCustomerMessage,
+    detectedTopic,
+    topicSuggestion,
+    priority,
+    recommendedAction,
+    suggestedReply,
+    frtAcknowledgement,
+    adminNote,
+    state,
+    open,
+    metricScore
+  };
+}
+
+function renderMainPanel(data, teammateName, conversationId) {
+  return buildCanvas([
+    {
+      type: "text",
+      text: "James Assist",
+      style: "header"
+    },
+
+    {
+      type: "text",
+      text: `${data.priority.label} — ${data.priority.summary}`
+    },
+    {
+      type: "text",
+      text: `🎯 Metrics score: ${data.metricScore}`
+    },
+    {
+      type: "text",
+      text: `⚡ Action: ${data.recommendedAction}`
+    },
+
+    {
+      type: "text",
+      text: "—"
+    },
+
+    {
+      type: "text",
+      text: `⏱ FRT: ${data.frt.status}`
+    },
+    {
+      type: "text",
+      text: `👤 Current customer wait: ${data.currentWait.text}`
+    },
+    {
+      type: "text",
+      text: `🏁 First close: ${data.firstClose.status}`
+    },
+
+    {
+      type: "text",
+      text: "—"
+    },
+
+    {
+      type: "text",
+      text: `🧭 Topic: ${data.detectedTopic}`
+    },
+    {
+      type: "text",
+      text: `Next check: ${data.topicSuggestion}`
+    },
+    {
+      type: "text",
+      text: `Customer said: ${data.latestCustomerMessage}`
+    },
+
+    {
+      type: "text",
+      text: "—"
+    },
+
+    {
+      type: "text",
+      text: `💬 Suggested reply: ${data.suggestedReply}`
+    },
+    {
+      type: "text",
+      text: `📝 Admin note: ${data.adminNote}`
+    },
+
+    {
+      type: "text",
+      text: "—"
+    },
+
+    {
+      type: "button",
+      id: "prepare_frt_ack",
+      label: "Prepare FRT acknowledgement",
+      style: "primary",
+      action: {
+        type: "submit"
+      }
+    },
+    {
+      type: "button",
+      id: "refresh_metrics",
+      label: "Refresh metrics",
+      style: "secondary",
+      action: {
+        type: "submit"
+      }
+    },
+
+    {
+      type: "text",
+      text: "—"
+    },
+
+    {
+      type: "text",
+      text: `Status: ${data.state} / ${data.open}`
+    },
+    {
+      type: "text",
+      text: `Teammate: ${teammateName}`
+    },
+    {
+      type: "text",
+      text: `Conversation: ${conversationId}`
+    },
+    {
+      type: "text",
+      text: `Targets: 30–50 cases/day · FRT <15m · First close <1h20m · CSAT 65%`
+    },
+    {
+      type: "text",
+      text: "Safe mode: read-only. Nothing is sent or changed."
+    }
+  ]);
+}
+
+function renderPreparedAckPanel(data, teammateName, conversationId) {
+  return buildCanvas([
+    {
+      type: "text",
+      text: "James Assist",
+      style: "header"
+    },
+    {
+      type: "text",
+      text: "✅ FRT acknowledgement prepared"
+    },
+    {
+      type: "text",
+      text: "This has NOT been sent. Copy it manually if you want to use it."
+    },
+    {
+      type: "text",
+      text: "—"
+    },
+    {
+      type: "text",
+      text: `💬 Acknowledgement: ${data.frtAcknowledgement}`
+    },
+    {
+      type: "text",
+      text: `🧭 Topic: ${data.detectedTopic}`
+    },
+    {
+      type: "text",
+      text: `⏱ FRT: ${data.frt.status}`
+    },
+    {
+      type: "text",
+      text: `👤 Current customer wait: ${data.currentWait.text}`
+    },
+    {
+      type: "text",
+      text: "—"
+    },
+    {
+      type: "button",
+      id: "refresh_metrics",
+      label: "Back to metrics",
+      style: "secondary",
+      action: {
+        type: "submit"
+      }
+    },
+    {
+      type: "text",
+      text: `Teammate: ${teammateName}`
+    },
+    {
+      type: "text",
+      text: `Conversation: ${conversationId}`
+    },
+    {
+      type: "text",
+      text: "Safe mode: read-only. Nothing is sent or changed."
+    }
+  ]);
+}
+
 async function renderJamesAssist(req, res) {
   console.log("James Assist render hit");
 
   const body = req.body || {};
-
-  const conversationId =
-    body.conversation?.id ||
-    body.context?.conversation_id ||
-    body.conversation_id ||
-    null;
-
-  const teammateName =
-    body.admin?.name ||
-    body.teammate?.name ||
-    body.context?.admin_name ||
-    "Unknown teammate";
+  const conversationId = getConversationIdFromBody(body);
+  const teammateName = getTeammateNameFromBody(body);
+  const componentId = getSubmittedComponentId(body);
 
   if (!conversationId) {
     return res.status(200).json(
@@ -549,150 +834,16 @@ async function renderJamesAssist(req, res) {
   }
 
   try {
-    const conversation = await fetchIntercomConversation(conversationId);
+    const data = await buildConversationData(conversationId);
 
-    const frt = calculateFRT(conversation);
-    const firstClose = calculateFirstClose(conversation);
-    const currentWait = getCurrentCustomerWait(conversation);
-
-    const latestCustomerMessage = getLatestCustomerMessage(conversation);
-    const detectedTopic = detectTopic(latestCustomerMessage);
-    const topicSuggestion = getTopicSuggestion(detectedTopic, frt, firstClose);
-
-    const priority = getPriority(frt, firstClose, currentWait, conversation);
-    const recommendedAction = getRecommendedAction(
-      conversation,
-      frt,
-      firstClose,
-      currentWait
-    );
-
-    const suggestedReply = buildSuggestedReply(
-      detectedTopic,
-      latestCustomerMessage,
-      frt
-    );
-
-    const adminNote = buildAdminNote(detectedTopic, latestCustomerMessage);
-
-    const state = conversation.state || "Unknown";
-    const open = conversation.open === true ? "Open" : "Not open";
-    const metricScore = getMetricScore(frt, firstClose);
+    if (componentId === "prepare_frt_ack") {
+      return res.status(200).json(
+        renderPreparedAckPanel(data, teammateName, conversationId)
+      );
+    }
 
     return res.status(200).json(
-      buildCanvas([
-        {
-          type: "text",
-          text: "James Assist",
-          style: "header"
-        },
-
-        {
-          type: "text",
-          text: `${priority.label} — ${priority.summary}`
-        },
-        {
-          type: "text",
-          text: `🎯 Metrics score: ${metricScore}`
-        },
-        {
-          type: "text",
-          text: `⚡ Action: ${recommendedAction}`
-        },
-
-        {
-          type: "text",
-          text: "—"
-        },
-
-        {
-          type: "text",
-          text: `⏱ FRT target: under 15 min`
-        },
-        {
-          type: "text",
-          text: `FRT: ${frt.status}`
-        },
-        {
-          type: "text",
-          text: `Current customer wait: ${currentWait.text}`
-        },
-        {
-          type: "text",
-          text: `First close target: under 1h 20m`
-        },
-        {
-          type: "text",
-          text: `First close: ${firstClose.status}`
-        },
-
-        {
-          type: "text",
-          text: "—"
-        },
-
-        {
-          type: "text",
-          text: `🧭 Topic: ${detectedTopic}`
-        },
-        {
-          type: "text",
-          text: `Next check: ${topicSuggestion}`
-        },
-        {
-          type: "text",
-          text: `Customer said: ${latestCustomerMessage}`
-        },
-
-        {
-          type: "text",
-          text: "—"
-        },
-
-        {
-          type: "text",
-          text: `💬 Suggested James reply: ${suggestedReply}`
-        },
-        {
-          type: "text",
-          text: `📝 Suggested admin note: ${adminNote}`
-        },
-
-        {
-          type: "text",
-          text: "—"
-        },
-
-        {
-          type: "text",
-          text: `Status: ${state} / ${open}`
-        },
-        {
-          type: "text",
-          text: `Teammate: ${teammateName}`
-        },
-        {
-          type: "text",
-          text: `Conversation: ${conversationId}`
-        },
-        {
-          type: "text",
-          text: `Targets: 30–50 cases/day · FRT <15m · First close <1h20m · CSAT 65%`
-        },
-        {
-          type: "text",
-          text: "Safe mode: read-only. Nothing is sent or changed."
-        },
-        {
-          type: "button",
-          id: "refresh_metrics",
-          label: "Refresh metrics",
-          style: "secondary",
-          action: {
-            type: "submit"
-          }
-        }
-      ])
+      renderMainPanel(data, teammateName, conversationId)
     );
   } catch (error) {
     console.error("James Assist error:", error.message);
