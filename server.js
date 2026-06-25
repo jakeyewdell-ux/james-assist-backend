@@ -11,7 +11,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (req, res) => {
-  res.status(200).send("James Assist is running.");
+  res.status(200).send("AgentVue is running.");
 });
 
 /**
@@ -1174,7 +1174,7 @@ function renderMainPanel(data, teammateName, conversationId) {
   return buildCanvas([
     {
       type: "text",
-      text: "James Assist",
+      text: "AgentVue",
       style: "header"
     },
 
@@ -1304,7 +1304,7 @@ function renderAckSentPanel(data, teammateName, conversationId) {
   return buildCanvas([
     {
       type: "text",
-      text: "James Assist",
+      text: "AgentVue",
       style: "header"
     },
     {
@@ -1347,7 +1347,7 @@ function renderAckBlockedPanel(reason, conversationId) {
   return buildCanvas([
     {
       type: "text",
-      text: "James Assist",
+      text: "AgentVue",
       style: "header"
     },
     {
@@ -1379,7 +1379,7 @@ function renderAckBlockedPanel(reason, conversationId) {
 }
 
 async function renderJamesAssist(req, res) {
-  console.log("James Assist render hit");
+  console.log("AgentVue render hit");
 
   const body = req.body || {};
   const conversationId = getConversationIdFromBody(body);
@@ -1391,7 +1391,7 @@ async function renderJamesAssist(req, res) {
       buildCanvas([
         {
           type: "text",
-          text: "James Assist",
+          text: "AgentVue",
           style: "header"
         },
         {
@@ -1429,13 +1429,13 @@ async function renderJamesAssist(req, res) {
       renderMainPanel(data, teammateName, conversationId)
     );
   } catch (error) {
-    console.error("James Assist error:", error.message);
+    console.error("AgentVue error:", error.message);
 
     return res.status(200).json(
       buildCanvas([
         {
           type: "text",
-          text: "James Assist",
+          text: "AgentVue",
           style: "header"
         },
         {
@@ -1465,5 +1465,5 @@ app.post("/intercom/submit", renderJamesAssist);
 const port = process.env.PORT || 3000;
 
 app.listen(port, () => {
-  console.log(`James Assist running on port ${port}`);
+  console.log(`AgentVue running on port ${port}`);
 });
