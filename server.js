@@ -21,15 +21,25 @@ app.get("/", (req, res) => {
  * - FRT: under 15 minutes
  * - Time to first close: under 1h 20min
  * - CSAT: 65%
+ *
+ * Shift:
+ * - 00:00–08:00 ICT
+ * - 1 hour break, default 04:00–05:00 ICT
  */
 const TARGETS = {
   frtSeconds: 15 * 60,
   firstCloseSeconds: 80 * 60,
-  dailyCasesMin: 30,
-  dailyCasesMax: 50,
-  postProbationDailyCases: 60,
-  csatTargetPercent: 65
+  dailyCasesMin: Number(process.env.DAILY_CASE_TARGET_MIN || 30),
+  dailyCasesMax: Number(process.env.DAILY_CASE_TARGET_MAX || 50),
+  postProbationDailyCases: Number(process.env.POST_PROBATION_DAILY_CASES || 60),
+  csatTargetPercent: Number(process.env.CSAT_TARGET_PERCENT || 65),
+  shiftStartHourICT: Number(process.env.SHIFT_START_HOUR_ICT || 0),
+  shiftEndHourICT: Number(process.env.SHIFT_END_HOUR_ICT || 8),
+  breakStartHourICT: Number(process.env.BREAK_START_HOUR_ICT || 4),
+  breakEndHourICT: Number(process.env.BREAK_END_HOUR_ICT || 5)
 };
+
+const ICT_OFFSET_SECONDS = 7 * 60 * 60;
 
 function formatDuration(seconds) {
   if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
@@ -54,6 +64,11 @@ function formatDuration(seconds) {
   }
 
   return `${hours}h ${remainingMinutes}m`;
+}
+
+function formatCasesPerHour(value) {
+  if (!Number.isFinite(value)) return "0.0/hr";
+  return `${value.toFixed(1)}/hr`;
 }
 
 function stripHtml(input) {
@@ -99,6 +114,7 @@ function getSourceItem(conversation) {
 
 function getLatestConversationItem(conversation) {
   const sourceItem = getSourceItem(conversation);
+
   const parts = getAllConversationParts(conversation).map((part) => ({
     body: part.body || "",
     created_at: part.created_at,
@@ -127,11 +143,14 @@ function getLatestCustomerPart(conversation) {
   const items = [];
 
   const sourceItem = getSourceItem(conversation);
+
   if (
     sourceItem?.created_at &&
-    (sourceItem.author_type === "user" ||
+    (
+      sourceItem.author_type === "user" ||
       sourceItem.author_type === "lead" ||
-      sourceItem.author_type === "contact")
+      sourceItem.author_type === "contact"
+    )
   ) {
     items.push(sourceItem);
   }
@@ -143,9 +162,11 @@ function getLatestCustomerPart(conversation) {
 
     if (
       part.created_at &&
-      (authorType === "user" ||
+      (
+        authorType === "user" ||
         authorType === "lead" ||
-        authorType === "contact")
+        authorType === "contact"
+      )
     ) {
       items.push({
         body: part.body || "",
@@ -174,12 +195,33 @@ function getLatestCustomerMessage(conversation) {
 }
 
 function getCurrentCustomerWait(conversation) {
+  if (conversation.state === "closed" || conversation.open !== true) {
+    return {
+      seconds: 0,
+      text: "Stopped — conversation closed"
+    };
+  }
+
   const latestCustomerPart = getLatestCustomerPart(conversation);
 
   if (!latestCustomerPart?.created_at) {
     return {
       seconds: null,
       text: "Unknown"
+    };
+  }
+
+  const latestItem = getLatestConversationItem(conversation);
+
+  if (
+    latestItem &&
+    latestItem.author_type !== "user" &&
+    latestItem.author_type !== "lead" &&
+    latestItem.author_type !== "contact"
+  ) {
+    return {
+      seconds: 0,
+      text: "Stopped — latest reply is from agent"
     };
   }
 
@@ -194,8 +236,8 @@ function getCurrentCustomerWait(conversation) {
 
 function calculateFRT(conversation) {
   const now = Math.floor(Date.now() / 1000);
-
   const createdAt = conversation.created_at;
+
   const firstAdminReplyAt =
     conversation.statistics?.first_admin_reply_at ||
     conversation.statistics?.first_contact_reply_at ||
@@ -260,8 +302,8 @@ function calculateFRT(conversation) {
 
 function calculateFirstClose(conversation) {
   const now = Math.floor(Date.now() / 1000);
-
   const createdAt = conversation.created_at;
+
   const closedAt =
     conversation.statistics?.first_close_at ||
     conversation.statistics?.last_close_at ||
@@ -474,7 +516,7 @@ function buildAdminNote(topic, latestCustomerMessage) {
   return `${today} JY: Customer contacted support. Detected topic: ${topic}. Latest message preview: ${latestCustomerMessage}`;
 }
 
-function getPriority(frt, firstClose, currentWait, conversation) {
+function getPriority(frt, firstClose, currentWait, conversation, shift) {
   if (frt.risk === "High" || firstClose.risk === "High") {
     return {
       label: "🔴 High",
@@ -482,10 +524,24 @@ function getPriority(frt, firstClose, currentWait, conversation) {
     };
   }
 
+  if (shift && shift.available && shift.paceStatus === "Behind") {
+    return {
+      label: "🔴 High",
+      summary: "Daily cases behind pace"
+    };
+  }
+
   if (frt.risk === "Medium" || firstClose.risk === "Medium") {
     return {
       label: "🟡 Medium",
       summary: "Needs attention soon"
+    };
+  }
+
+  if (shift && shift.available && shift.paceStatus === "Slightly behind") {
+    return {
+      label: "🟡 Medium",
+      summary: "Daily cases slightly behind pace"
     };
   }
 
@@ -509,13 +565,9 @@ function getPriority(frt, firstClose, currentWait, conversation) {
   };
 }
 
-function getRecommendedAction(conversation, frt, firstClose, currentWait) {
+function getRecommendedAction(conversation, frt, firstClose, currentWait, shift) {
   const isClosed = conversation.state === "closed";
   const isOpen = conversation.open === true;
-
-  if (isClosed) {
-    return "No action needed — conversation is closed.";
-  }
 
   if (frt.risk === "High") {
     return "Reply now to bring FRT back under control.";
@@ -533,6 +585,18 @@ function getRecommendedAction(conversation, frt, firstClose, currentWait) {
     return "Move this toward resolution to protect first close time.";
   }
 
+  if (shift && shift.available && shift.paceStatus === "Behind") {
+    return `Push closes now — ${shift.remainingForMinTarget} more needed for 30 cases.`;
+  }
+
+  if (shift && shift.available && shift.paceStatus === "Slightly behind") {
+    return "You are slightly behind case pace — prioritise close-ready conversations.";
+  }
+
+  if (isClosed) {
+    return "No action needed — conversation is closed.";
+  }
+
   if (isOpen && frt.done && currentWait.seconds !== null && currentWait.seconds >= 10 * 60) {
     return "Customer has replied — review and respond if needed.";
   }
@@ -544,7 +608,7 @@ function getRecommendedAction(conversation, frt, firstClose, currentWait) {
   return "Healthy for now — keep an eye on it.";
 }
 
-function getMetricScore(frt, firstClose) {
+function getMetricScore(frt, firstClose, shift) {
   let score = 100;
 
   if (frt.risk === "High") score -= 40;
@@ -555,11 +619,127 @@ function getMetricScore(frt, firstClose) {
   if (firstClose.risk === "Medium") score -= 15;
   if (firstClose.risk === "Missed") score -= 25;
 
+  if (shift && shift.available) {
+    if (shift.paceStatus === "Behind") score -= 25;
+    if (shift.paceStatus === "Slightly behind") score -= 12;
+  }
+
   if (score < 0) score = 0;
 
   if (score >= 85) return `🟢 ${score}/100`;
   if (score >= 60) return `🟡 ${score}/100`;
   return `🔴 ${score}/100`;
+}
+
+function ictLocalToUnixTimestamp(year, monthIndex, day, hour, minute = 0) {
+  return Math.floor(
+    (Date.UTC(year, monthIndex, day, hour, minute, 0) -
+      ICT_OFFSET_SECONDS * 1000) / 1000
+  );
+}
+
+function getShiftWindowICT() {
+  const nowMs = Date.now();
+  const ictNow = new Date(nowMs + ICT_OFFSET_SECONDS * 1000);
+
+  const year = ictNow.getUTCFullYear();
+  const monthIndex = ictNow.getUTCMonth();
+  const day = ictNow.getUTCDate();
+
+  const shiftStart = ictLocalToUnixTimestamp(
+    year,
+    monthIndex,
+    day,
+    TARGETS.shiftStartHourICT
+  );
+
+  const shiftEnd = ictLocalToUnixTimestamp(
+    year,
+    monthIndex,
+    day,
+    TARGETS.shiftEndHourICT
+  );
+
+  const breakStart = ictLocalToUnixTimestamp(
+    year,
+    monthIndex,
+    day,
+    TARGETS.breakStartHourICT
+  );
+
+  const breakEnd = ictLocalToUnixTimestamp(
+    year,
+    monthIndex,
+    day,
+    TARGETS.breakEndHourICT
+  );
+
+  return {
+    now: Math.floor(nowMs / 1000),
+    shiftStart,
+    shiftEnd,
+    breakStart,
+    breakEnd,
+    label: `${String(TARGETS.shiftStartHourICT).padStart(2, "0")}:00–${String(TARGETS.shiftEndHourICT).padStart(2, "0")}:00 ICT`,
+    breakLabel: `${String(TARGETS.breakStartHourICT).padStart(2, "0")}:00–${String(TARGETS.breakEndHourICT).padStart(2, "0")}:00 ICT`
+  };
+}
+
+function overlapSeconds(startA, endA, startB, endB) {
+  const start = Math.max(startA, startB);
+  const end = Math.min(endA, endB);
+
+  if (end <= start) return 0;
+  return end - start;
+}
+
+function calculateShiftElapsed(window) {
+  const nowClamped = Math.min(Math.max(window.now, window.shiftStart), window.shiftEnd);
+
+  const totalShiftSeconds = window.shiftEnd - window.shiftStart;
+  const totalBreakSeconds = Math.max(0, window.breakEnd - window.breakStart);
+  const totalWorkSeconds = totalShiftSeconds - totalBreakSeconds;
+
+  const rawElapsed = Math.max(0, nowClamped - window.shiftStart);
+  const breakElapsed = overlapSeconds(
+    window.shiftStart,
+    nowClamped,
+    window.breakStart,
+    window.breakEnd
+  );
+
+  const workedElapsedSeconds = Math.max(0, rawElapsed - breakElapsed);
+  const remainingWorkSeconds = Math.max(0, totalWorkSeconds - workedElapsedSeconds);
+
+  const progress =
+    totalWorkSeconds > 0
+      ? Math.min(1, Math.max(0, workedElapsedSeconds / totalWorkSeconds))
+      : 0;
+
+  let shiftStatus = "In shift";
+
+  if (window.now < window.shiftStart) {
+    shiftStatus = "Before shift";
+  }
+
+  if (window.now >= window.shiftEnd) {
+    shiftStatus = "Shift ended";
+  }
+
+  if (window.now >= window.breakStart && window.now < window.breakEnd) {
+    shiftStatus = "On break";
+  }
+
+  return {
+    shiftStatus,
+    totalWorkSeconds,
+    workedElapsedSeconds,
+    remainingWorkSeconds,
+    progress,
+    workedElapsedText: formatDuration(workedElapsedSeconds),
+    totalWorkText: formatDuration(totalWorkSeconds),
+    remainingWorkText: formatDuration(remainingWorkSeconds)
+  };
 }
 
 async function fetchIntercomConversation(conversationId) {
@@ -587,6 +767,152 @@ async function fetchIntercomConversation(conversationId) {
   }
 
   return response.json();
+}
+
+async function searchClosedCasesThisShift(shiftStart, shiftEnd) {
+  const token = process.env.INTERCOM_ACCESS_TOKEN;
+  const adminId = process.env.JAMES_ADMIN_ID;
+
+  if (!token) {
+    throw new Error("Missing INTERCOM_ACCESS_TOKEN environment variable");
+  }
+
+  if (!adminId) {
+    throw new Error("Missing JAMES_ADMIN_ID environment variable");
+  }
+
+  const response = await fetch("https://api.intercom.io/conversations/search", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "Intercom-Version": "2.11"
+    },
+    body: JSON.stringify({
+      query: {
+        operator: "AND",
+        value: [
+          {
+            field: "state",
+            operator: "=",
+            value: "closed"
+          },
+          {
+            field: "admin_assignee_id",
+            operator: "=",
+            value: String(adminId)
+          },
+          {
+            field: "updated_at",
+            operator: ">",
+            value: shiftStart
+          },
+          {
+            field: "updated_at",
+            operator: "<",
+            value: shiftEnd
+          }
+        ]
+      },
+      pagination: {
+        per_page: 100
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Intercom shift search error ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+
+  return {
+    count: data.total_count || data.conversations?.length || 0,
+    raw: data
+  };
+}
+
+async function calculateShiftCases() {
+  try {
+    const window = getShiftWindowICT();
+    const elapsed = calculateShiftElapsed(window);
+
+    const result = await searchClosedCasesThisShift(
+      window.shiftStart,
+      Math.min(window.now, window.shiftEnd)
+    );
+
+    const closedCount = result.count;
+
+    const expectedMinByNow = Math.floor(TARGETS.dailyCasesMin * elapsed.progress);
+    const expectedMaxByNow = Math.ceil(TARGETS.dailyCasesMax * elapsed.progress);
+
+    const remainingForMinTarget = Math.max(0, TARGETS.dailyCasesMin - closedCount);
+    const remainingForMaxTarget = Math.max(0, TARGETS.dailyCasesMax - closedCount);
+
+    const remainingHours = elapsed.remainingWorkSeconds / 3600;
+
+    const requiredPaceMin =
+      remainingHours > 0 ? remainingForMinTarget / remainingHours : remainingForMinTarget;
+
+    const requiredPaceMax =
+      remainingHours > 0 ? remainingForMaxTarget / remainingHours : remainingForMaxTarget;
+
+    let paceStatus = "On track";
+    let paceIcon = "🟢";
+
+    if (closedCount < Math.floor(expectedMinByNow * 0.8)) {
+      paceStatus = "Behind";
+      paceIcon = "🔴";
+    } else if (closedCount < expectedMinByNow) {
+      paceStatus = "Slightly behind";
+      paceIcon = "🟡";
+    }
+
+    if (closedCount >= expectedMinByNow) {
+      paceStatus = "On track";
+      paceIcon = "🟢";
+    }
+
+    if (closedCount >= TARGETS.dailyCasesMin) {
+      paceStatus = "Minimum hit";
+      paceIcon = "✅";
+    }
+
+    if (closedCount >= TARGETS.dailyCasesMax) {
+      paceStatus = "Strong target hit";
+      paceIcon = "🏆";
+    }
+
+    return {
+      available: true,
+      count: closedCount,
+      shiftStatus: elapsed.shiftStatus,
+      shiftLabel: window.label,
+      breakLabel: window.breakLabel,
+      workedElapsedText: elapsed.workedElapsedText,
+      totalWorkText: elapsed.totalWorkText,
+      remainingWorkText: elapsed.remainingWorkText,
+      progressPercent: Math.round(elapsed.progress * 100),
+      expectedMinByNow,
+      expectedMaxByNow,
+      remainingForMinTarget,
+      remainingForMaxTarget,
+      requiredPaceMin,
+      requiredPaceMax,
+      paceStatus,
+      paceIcon
+    };
+  } catch (error) {
+    console.error("Shift case monitor error:", error.message);
+
+    return {
+      available: false,
+      error: error.message.substring(0, 250)
+    };
+  }
 }
 
 async function sendIntercomReply(conversationId, body) {
@@ -749,17 +1075,19 @@ async function buildConversationData(conversationId) {
   const frt = calculateFRT(conversation);
   const firstClose = calculateFirstClose(conversation);
   const currentWait = getCurrentCustomerWait(conversation);
+  const shift = await calculateShiftCases();
 
   const latestCustomerMessage = getLatestCustomerMessage(conversation);
   const detectedTopic = detectTopic(latestCustomerMessage);
   const topicSuggestion = getTopicSuggestion(detectedTopic, frt, firstClose);
 
-  const priority = getPriority(frt, firstClose, currentWait, conversation);
+  const priority = getPriority(frt, firstClose, currentWait, conversation, shift);
   const recommendedAction = getRecommendedAction(
     conversation,
     frt,
     firstClose,
-    currentWait
+    currentWait,
+    shift
   );
 
   const suggestedReply = buildSuggestedReply(
@@ -778,13 +1106,14 @@ async function buildConversationData(conversationId) {
 
   const state = conversation.state || "Unknown";
   const open = conversation.open === true ? "Open" : "Not open";
-  const metricScore = getMetricScore(frt, firstClose);
+  const metricScore = getMetricScore(frt, firstClose, shift);
 
   return {
     conversation,
     frt,
     firstClose,
     currentWait,
+    shift,
     latestCustomerMessage,
     detectedTopic,
     topicSuggestion,
@@ -797,6 +1126,48 @@ async function buildConversationData(conversationId) {
     open,
     metricScore
   };
+}
+
+function renderShiftComponents(shift) {
+  if (!shift || !shift.available) {
+    return [
+      {
+        type: "text",
+        text: "📊 Shift cases: unavailable"
+      },
+      {
+        type: "text",
+        text: `Reason: ${shift?.error || "Unknown error"}`
+      }
+    ];
+  }
+
+  return [
+    {
+      type: "text",
+      text: `📊 Shift cases: ${shift.paceIcon} ${shift.count}/${TARGETS.dailyCasesMin} minimum`
+    },
+    {
+      type: "text",
+      text: `Pace: ${shift.paceStatus} · Expected now: ${shift.expectedMinByNow}–${shift.expectedMaxByNow}`
+    },
+    {
+      type: "text",
+      text: `Shift: ${shift.shiftLabel} · Break: ${shift.breakLabel}`
+    },
+    {
+      type: "text",
+      text: `Worked: ${shift.workedElapsedText}/${shift.totalWorkText} · Remaining: ${shift.remainingWorkText}`
+    },
+    {
+      type: "text",
+      text: `Needed: ${shift.remainingForMinTarget} for 30 · ${shift.remainingForMaxTarget} for 50`
+    },
+    {
+      type: "text",
+      text: `Required pace: ${formatCasesPerHour(shift.requiredPaceMin)} for 30 · ${formatCasesPerHour(shift.requiredPaceMax)} for 50`
+    }
+  ];
 }
 
 function renderMainPanel(data, teammateName, conversationId) {
@@ -819,6 +1190,13 @@ function renderMainPanel(data, teammateName, conversationId) {
       type: "text",
       text: `⚡ Action: ${data.recommendedAction}`
     },
+
+    {
+      type: "text",
+      text: "—"
+    },
+
+    ...renderShiftComponents(data.shift),
 
     {
       type: "text",
