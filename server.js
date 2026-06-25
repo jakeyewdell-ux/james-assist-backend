@@ -38,13 +38,16 @@ function calculateFRT(conversation) {
     conversation.statistics?.first_contact_reply_at ||
     null;
 
-  const targetSeconds = 30 * 60; // 30-minute FRT target for testing
+  const targetSeconds = 30 * 60; // 30-minute FRT target
 
   if (firstAdminReplyAt && createdAt) {
     return {
       status: "First reply already sent",
       waitingText: formatMinutes(firstAdminReplyAt - createdAt),
-      risk: "Resolved"
+      risk: "Resolved",
+      secondsRemaining: null,
+      waitingSeconds: firstAdminReplyAt - createdAt,
+      firstReplySent: true
     };
   }
 
@@ -52,7 +55,10 @@ function calculateFRT(conversation) {
     return {
       status: "Unable to calculate yet",
       waitingText: "Unknown",
-      risk: "Unknown"
+      risk: "Unknown",
+      secondsRemaining: null,
+      waitingSeconds: null,
+      firstReplySent: false
     };
   }
 
@@ -63,7 +69,10 @@ function calculateFRT(conversation) {
     return {
       status: "FRT breached",
       waitingText: formatMinutes(waitingSeconds),
-      risk: "High"
+      risk: "High",
+      secondsRemaining,
+      waitingSeconds,
+      firstReplySent: false
     };
   }
 
@@ -71,15 +80,56 @@ function calculateFRT(conversation) {
     return {
       status: `At risk in ${formatMinutes(secondsRemaining)}`,
       waitingText: formatMinutes(waitingSeconds),
-      risk: "Medium"
+      risk: "Medium",
+      secondsRemaining,
+      waitingSeconds,
+      firstReplySent: false
     };
   }
 
   return {
     status: `Healthy — ${formatMinutes(secondsRemaining)} remaining`,
     waitingText: formatMinutes(waitingSeconds),
-    risk: "Low"
+    risk: "Low",
+    secondsRemaining,
+    waitingSeconds,
+    firstReplySent: false
   };
+}
+
+function getRecommendedAction(conversation, frt) {
+  const isClosed = conversation.state === "closed";
+  const isOpen = conversation.open === true;
+
+  if (frt.firstReplySent && isClosed) {
+    return "No FRT action needed — first reply was sent and the conversation is closed.";
+  }
+
+  if (frt.firstReplySent && isOpen) {
+    return "First reply is complete. Review the latest customer message before closing.";
+  }
+
+  if (frt.risk === "High") {
+    return "Reply now — FRT has breached or is past target.";
+  }
+
+  if (frt.risk === "Medium") {
+    return "Reply soon — this conversation is close to FRT risk.";
+  }
+
+  if (frt.risk === "Low") {
+    return "Healthy for now — keep an eye on it.";
+  }
+
+  return "Review manually — James Assist could not calculate the FRT status.";
+}
+
+function getPriority(frt) {
+  if (frt.risk === "High") return "High";
+  if (frt.risk === "Medium") return "Medium";
+  if (frt.risk === "Low") return "Low";
+  if (frt.risk === "Resolved") return "Resolved";
+  return "Unknown";
 }
 
 async function fetchIntercomConversation(conversationId) {
@@ -154,6 +204,9 @@ app.post("/intercom/initialize", async (req, res) => {
     const conversation = await fetchIntercomConversation(conversationId);
     const frt = calculateFRT(conversation);
 
+    const priority = getPriority(frt);
+    const recommendedAction = getRecommendedAction(conversation, frt);
+
     const assignee =
       conversation.admin_assignee_id ||
       conversation.team_assignee_id ||
@@ -173,11 +226,11 @@ app.post("/intercom/initialize", async (req, res) => {
             },
             {
               type: "text",
-              text: `Teammate: ${teammateName}`
+              text: `Priority: ${priority}`
             },
             {
               type: "text",
-              text: `Conversation ID: ${conversationId}`
+              text: `Recommended action: ${recommendedAction}`
             },
             {
               type: "text",
@@ -190,6 +243,14 @@ app.post("/intercom/initialize", async (req, res) => {
             {
               type: "text",
               text: `Risk: ${frt.risk}`
+            },
+            {
+              type: "text",
+              text: `Teammate: ${teammateName}`
+            },
+            {
+              type: "text",
+              text: `Conversation ID: ${conversationId}`
             },
             {
               type: "text",
