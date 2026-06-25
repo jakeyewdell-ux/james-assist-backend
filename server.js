@@ -256,6 +256,44 @@ function getTopicSuggestion(topic, frt) {
   return "Review the conversation and reply using the relevant support process.";
 }
 
+function buildSuggestedReply(topic, latestCustomerMessage, frt) {
+  if (!latestCustomerMessage || latestCustomerMessage === "No message preview found.") {
+    return "Hey there, thanks so much for reaching out! I’ll take a look into this for you now and get back to you as soon as I can. 💚";
+  }
+
+  if (topic === "Payments / payouts") {
+    return "Hey there, thanks so much for reaching out! I’m really sorry for the worry here. I’ll take a look into the payout/payment details for you now and help get this checked as quickly as possible. 💚";
+  }
+
+  if (topic === "Verification") {
+    return "Hey there, thanks so much for reaching out! I’ll check the verification details for you and help confirm what’s needed next. 💚";
+  }
+
+  if (topic === "Billing / subscription") {
+    return "Hey there, thanks so much for reaching out! I’m sorry for any confusion here. I’ll review the billing/subscription details and help get this looked into for you. 💚";
+  }
+
+  if (topic === "Account access") {
+    return "Hey there, thanks so much for reaching out! I’m sorry you’re having trouble accessing your account. I’ll take a look and help guide you through the next steps. 💚";
+  }
+
+  if (topic === "Content / uploads") {
+    return "Hey there, thanks so much for reaching out! I’ll check what’s happening with the content/upload issue and help get this looked into for you. 💚";
+  }
+
+  if (frt.risk === "High") {
+    return "Hey there, thanks so much for waiting. I’m really sorry for the delay here — I’m checking this for you now and will help as quickly as possible. 💚";
+  }
+
+  return "Hey there, thanks so much for reaching out! I’ll take a look into this for you now and help get this sorted. 💚";
+}
+
+function buildAdminNote(topic, latestCustomerMessage) {
+  const today = new Date().toISOString().slice(0, 10);
+
+  return `${today} JY: Customer contacted support. Detected topic: ${topic}. Latest message preview: ${latestCustomerMessage}`;
+}
+
 async function fetchIntercomConversation(conversationId) {
   const token = process.env.INTERCOM_ACCESS_TOKEN;
 
@@ -335,6 +373,14 @@ app.post("/intercom/initialize", async (req, res) => {
     const detectedTopic = detectTopic(latestCustomerMessage);
     const topicSuggestion = getTopicSuggestion(detectedTopic, frt);
 
+    const suggestedReply = buildSuggestedReply(
+      detectedTopic,
+      latestCustomerMessage,
+      frt
+    );
+
+    const adminNote = buildAdminNote(detectedTopic, latestCustomerMessage);
+
     const assignee =
       conversation.admin_assignee_id ||
       conversation.team_assignee_id ||
@@ -375,6 +421,14 @@ app.post("/intercom/initialize", async (req, res) => {
             {
               type: "text",
               text: `Topic suggestion: ${topicSuggestion}`
+            },
+            {
+              type: "text",
+              text: `Suggested James reply: ${suggestedReply}`
+            },
+            {
+              type: "text",
+              text: `Suggested admin note: ${adminNote}`
             },
             {
               type: "text",
