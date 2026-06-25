@@ -15,16 +15,17 @@ app.get("/", (req, res) => {
 });
 
 /**
- * SUPPORT TARGETS
+ * AGENTVUE TARGETS
+ *
  * Probation:
  * - Daily cases: 30–50/day
  * - FRT: under 15 minutes
  * - Time to first close: under 1h 20min
  * - CSAT: 65%
  *
- * Shift:
- * - 00:00–08:00 ICT
- * - 1 hour break, default 04:00–05:00 ICT
+ * Shift tracking:
+ * - Counts all cases closed between 00:00–08:00 ICT
+ * - Breaks are NOT excluded from the closed case count
  */
 const TARGETS = {
   frtSeconds: 15 * 60,
@@ -34,9 +35,7 @@ const TARGETS = {
   postProbationDailyCases: Number(process.env.POST_PROBATION_DAILY_CASES || 60),
   csatTargetPercent: Number(process.env.CSAT_TARGET_PERCENT || 65),
   shiftStartHourICT: Number(process.env.SHIFT_START_HOUR_ICT || 0),
-  shiftEndHourICT: Number(process.env.SHIFT_END_HOUR_ICT || 8),
-  breakStartHourICT: Number(process.env.BREAK_START_HOUR_ICT || 4),
-  breakEndHourICT: Number(process.env.BREAK_END_HOUR_ICT || 5)
+  shiftEndHourICT: Number(process.env.SHIFT_END_HOUR_ICT || 8)
 };
 
 const ICT_OFFSET_SECONDS = 7 * 60 * 60;
@@ -88,7 +87,7 @@ function stripHtml(input) {
     .trim();
 }
 
-function truncateText(text, maxLength = 180) {
+function truncateText(text, maxLength = 150) {
   if (!text) return "No message preview found.";
   if (text.length <= maxLength) return text;
   return `${text.substring(0, maxLength)}...`;
@@ -198,7 +197,7 @@ function getCurrentCustomerWait(conversation) {
   if (conversation.state === "closed" || conversation.open !== true) {
     return {
       seconds: 0,
-      text: "Stopped — conversation closed"
+      text: "Stopped — closed"
     };
   }
 
@@ -221,7 +220,7 @@ function getCurrentCustomerWait(conversation) {
   ) {
     return {
       seconds: 0,
-      text: "Stopped — latest reply is from agent"
+      text: "Stopped — agent replied"
     };
   }
 
@@ -249,9 +248,10 @@ function calculateFRT(conversation) {
 
     return {
       done: true,
+      label: hitTarget ? "✅ FRT hit" : "🔴 FRT missed",
       status: hitTarget
-        ? `✅ Hit target — first reply in ${formatDuration(frtSeconds)}`
-        : `🔴 Missed target — first reply in ${formatDuration(frtSeconds)}`,
+        ? `First reply in ${formatDuration(frtSeconds)}`
+        : `First reply in ${formatDuration(frtSeconds)}`,
       seconds: frtSeconds,
       remainingSeconds: null,
       risk: hitTarget ? "Resolved" : "Missed"
@@ -261,7 +261,8 @@ function calculateFRT(conversation) {
   if (!createdAt) {
     return {
       done: false,
-      status: "⚪ Unable to calculate FRT",
+      label: "⚪ FRT unknown",
+      status: "Unable to calculate",
       seconds: null,
       remainingSeconds: null,
       risk: "Unknown"
@@ -274,7 +275,8 @@ function calculateFRT(conversation) {
   if (remainingSeconds <= 0) {
     return {
       done: false,
-      status: `🔴 FRT breached — waiting ${formatDuration(waitingSeconds)}`,
+      label: "🔴 FRT breached",
+      status: `Waiting ${formatDuration(waitingSeconds)}`,
       seconds: waitingSeconds,
       remainingSeconds,
       risk: "High"
@@ -284,7 +286,8 @@ function calculateFRT(conversation) {
   if (remainingSeconds <= 5 * 60) {
     return {
       done: false,
-      status: `🟡 FRT at risk — ${formatDuration(remainingSeconds)} left`,
+      label: "🟡 FRT risk",
+      status: `${formatDuration(remainingSeconds)} left`,
       seconds: waitingSeconds,
       remainingSeconds,
       risk: "Medium"
@@ -293,7 +296,8 @@ function calculateFRT(conversation) {
 
   return {
     done: false,
-    status: `🟢 Healthy — ${formatDuration(remainingSeconds)} left`,
+    label: "🟢 FRT healthy",
+    status: `${formatDuration(remainingSeconds)} left`,
     seconds: waitingSeconds,
     remainingSeconds,
     risk: "Low"
@@ -313,7 +317,8 @@ function calculateFirstClose(conversation) {
   if (!createdAt) {
     return {
       done: false,
-      status: "⚪ Unable to calculate first close",
+      label: "⚪ Close unknown",
+      status: "Unable to calculate",
       elapsedText: "Unknown",
       risk: "Unknown"
     };
@@ -325,9 +330,8 @@ function calculateFirstClose(conversation) {
 
     return {
       done: true,
-      status: hitTarget
-        ? `✅ Hit target — first close in ${formatDuration(closeSeconds)}`
-        : `🔴 Missed target — first close in ${formatDuration(closeSeconds)}`,
+      label: hitTarget ? "✅ Close hit" : "🔴 Close missed",
+      status: `Closed in ${formatDuration(closeSeconds)}`,
       elapsedText: formatDuration(closeSeconds),
       risk: hitTarget ? "Resolved" : "Missed"
     };
@@ -339,7 +343,8 @@ function calculateFirstClose(conversation) {
   if (remainingSeconds <= 0) {
     return {
       done: false,
-      status: `🔴 First close target breached — open for ${formatDuration(elapsedSeconds)}`,
+      label: "🔴 Close breached",
+      status: `Open ${formatDuration(elapsedSeconds)}`,
       elapsedText: formatDuration(elapsedSeconds),
       risk: "High"
     };
@@ -348,7 +353,8 @@ function calculateFirstClose(conversation) {
   if (remainingSeconds <= 15 * 60) {
     return {
       done: false,
-      status: `🟡 First close at risk — ${formatDuration(remainingSeconds)} left`,
+      label: "🟡 Close risk",
+      status: `${formatDuration(remainingSeconds)} left`,
       elapsedText: formatDuration(elapsedSeconds),
       risk: "Medium"
     };
@@ -356,7 +362,8 @@ function calculateFirstClose(conversation) {
 
   return {
     done: false,
-    status: `🟢 First close healthy — ${formatDuration(remainingSeconds)} left`,
+    label: "🟢 Close healthy",
+    status: `${formatDuration(remainingSeconds)} left`,
     elapsedText: formatDuration(elapsedSeconds),
     risk: "Low"
   };
@@ -421,15 +428,15 @@ function getTopicSuggestion(topic, frt, firstClose) {
   }
 
   if (firstClose.risk === "High") {
-    return "Prioritise resolution or close if fully solved.";
+    return "Prioritise resolution or close if solved.";
   }
 
   if (topic === "Payments / payouts") {
-    return "Check payout/payment status before replying.";
+    return "Check payout/payment status.";
   }
 
   if (topic === "Verification") {
-    return "Check verification status and required document guidance.";
+    return "Check verification status and document guidance.";
   }
 
   if (topic === "Billing / subscription") {
@@ -437,14 +444,14 @@ function getTopicSuggestion(topic, frt, firstClose) {
   }
 
   if (topic === "Account access") {
-    return "Check account status and access history before replying.";
+    return "Check account status and access history.";
   }
 
   if (topic === "Content / uploads") {
-    return "Check upload/content status and moderation context.";
+    return "Check content/upload or moderation context.";
   }
 
-  return "Review the conversation and reply using the relevant support process.";
+  return "Review and use the relevant support process.";
 }
 
 function buildSuggestedReply(topic, latestCustomerMessage, frt) {
@@ -513,7 +520,7 @@ function buildFTRAcknowledgement(topic, frt, currentWait) {
 
 function buildAdminNote(topic, latestCustomerMessage) {
   const today = new Date().toISOString().slice(0, 10);
-  return `${today} JY: Customer contacted support. Detected topic: ${topic}. Latest message preview: ${latestCustomerMessage}`;
+  return `${today} JY: Customer contacted support. Topic: ${topic}. Preview: ${latestCustomerMessage}`;
 }
 
 function getPriority(frt, firstClose, currentWait, conversation, shift) {
@@ -527,7 +534,7 @@ function getPriority(frt, firstClose, currentWait, conversation, shift) {
   if (shift && shift.available && shift.paceStatus === "Behind") {
     return {
       label: "🔴 High",
-      summary: "Daily cases behind pace"
+      summary: "Case pace behind"
     };
   }
 
@@ -541,27 +548,27 @@ function getPriority(frt, firstClose, currentWait, conversation, shift) {
   if (shift && shift.available && shift.paceStatus === "Slightly behind") {
     return {
       label: "🟡 Medium",
-      summary: "Daily cases slightly behind pace"
+      summary: "Case pace slightly behind"
     };
   }
 
   if (conversation.state === "closed") {
     return {
       label: "✅ Resolved",
-      summary: "No active action needed"
+      summary: "No active action"
     };
   }
 
   if (currentWait.seconds !== null && currentWait.seconds >= 10 * 60) {
     return {
       label: "🟡 Medium",
-      summary: "Customer has been waiting"
+      summary: "Customer waiting"
     };
   }
 
   return {
     label: "🟢 Low",
-    summary: "Healthy for now"
+    summary: "Healthy"
   };
 }
 
@@ -570,42 +577,42 @@ function getRecommendedAction(conversation, frt, firstClose, currentWait, shift)
   const isOpen = conversation.open === true;
 
   if (frt.risk === "High") {
-    return "Reply now to bring FRT back under control.";
+    return "Reply now to protect FRT.";
   }
 
   if (frt.risk === "Medium") {
-    return "Reply soon — FRT is close to the 15 min target.";
+    return "Reply soon — FRT is near 15 min.";
   }
 
   if (firstClose.risk === "High") {
-    return "Prioritise resolution or close if the issue is fully solved.";
+    return "Prioritise resolution or close if solved.";
   }
 
   if (firstClose.risk === "Medium") {
-    return "Move this toward resolution to protect first close time.";
+    return "Move toward resolution.";
   }
 
   if (shift && shift.available && shift.paceStatus === "Behind") {
-    return `Push closes now — ${shift.remainingForMinTarget} more needed for 30 cases.`;
+    return `Push close-ready cases — ${shift.remainingForMinTarget} more needed for 30.`;
   }
 
   if (shift && shift.available && shift.paceStatus === "Slightly behind") {
-    return "You are slightly behind case pace — prioritise close-ready conversations.";
+    return "Slightly behind case pace — prioritise close-ready conversations.";
   }
 
   if (isClosed) {
-    return "No action needed — conversation is closed.";
+    return "No action — conversation is closed.";
   }
 
   if (isOpen && frt.done && currentWait.seconds !== null && currentWait.seconds >= 10 * 60) {
-    return "Customer has replied — review and respond if needed.";
+    return "Customer replied — review and respond if needed.";
   }
 
   if (isOpen && frt.done) {
-    return "First reply is complete. Review latest customer message and close when solved.";
+    return "First reply complete. Close when solved.";
   }
 
-  return "Healthy for now — keep an eye on it.";
+  return "Healthy for now.";
 }
 
 function getMetricScore(frt, firstClose, shift) {
@@ -660,60 +667,24 @@ function getShiftWindowICT() {
     TARGETS.shiftEndHourICT
   );
 
-  const breakStart = ictLocalToUnixTimestamp(
-    year,
-    monthIndex,
-    day,
-    TARGETS.breakStartHourICT
-  );
-
-  const breakEnd = ictLocalToUnixTimestamp(
-    year,
-    monthIndex,
-    day,
-    TARGETS.breakEndHourICT
-  );
-
   return {
     now: Math.floor(nowMs / 1000),
     shiftStart,
     shiftEnd,
-    breakStart,
-    breakEnd,
-    label: `${String(TARGETS.shiftStartHourICT).padStart(2, "0")}:00–${String(TARGETS.shiftEndHourICT).padStart(2, "0")}:00 ICT`,
-    breakLabel: `${String(TARGETS.breakStartHourICT).padStart(2, "0")}:00–${String(TARGETS.breakEndHourICT).padStart(2, "0")}:00 ICT`
+    label: `${String(TARGETS.shiftStartHourICT).padStart(2, "0")}:00–${String(TARGETS.shiftEndHourICT).padStart(2, "0")}:00 ICT`
   };
-}
-
-function overlapSeconds(startA, endA, startB, endB) {
-  const start = Math.max(startA, startB);
-  const end = Math.min(endA, endB);
-
-  if (end <= start) return 0;
-  return end - start;
 }
 
 function calculateShiftElapsed(window) {
   const nowClamped = Math.min(Math.max(window.now, window.shiftStart), window.shiftEnd);
 
   const totalShiftSeconds = window.shiftEnd - window.shiftStart;
-  const totalBreakSeconds = Math.max(0, window.breakEnd - window.breakStart);
-  const totalWorkSeconds = totalShiftSeconds - totalBreakSeconds;
-
-  const rawElapsed = Math.max(0, nowClamped - window.shiftStart);
-  const breakElapsed = overlapSeconds(
-    window.shiftStart,
-    nowClamped,
-    window.breakStart,
-    window.breakEnd
-  );
-
-  const workedElapsedSeconds = Math.max(0, rawElapsed - breakElapsed);
-  const remainingWorkSeconds = Math.max(0, totalWorkSeconds - workedElapsedSeconds);
+  const elapsedSeconds = Math.max(0, nowClamped - window.shiftStart);
+  const remainingSeconds = Math.max(0, totalShiftSeconds - elapsedSeconds);
 
   const progress =
-    totalWorkSeconds > 0
-      ? Math.min(1, Math.max(0, workedElapsedSeconds / totalWorkSeconds))
+    totalShiftSeconds > 0
+      ? Math.min(1, Math.max(0, elapsedSeconds / totalShiftSeconds))
       : 0;
 
   let shiftStatus = "In shift";
@@ -726,19 +697,15 @@ function calculateShiftElapsed(window) {
     shiftStatus = "Shift ended";
   }
 
-  if (window.now >= window.breakStart && window.now < window.breakEnd) {
-    shiftStatus = "On break";
-  }
-
   return {
     shiftStatus,
-    totalWorkSeconds,
-    workedElapsedSeconds,
-    remainingWorkSeconds,
+    totalShiftSeconds,
+    elapsedSeconds,
+    remainingSeconds,
     progress,
-    workedElapsedText: formatDuration(workedElapsedSeconds),
-    totalWorkText: formatDuration(totalWorkSeconds),
-    remainingWorkText: formatDuration(remainingWorkSeconds)
+    elapsedText: formatDuration(elapsedSeconds),
+    totalText: formatDuration(totalShiftSeconds),
+    remainingText: formatDuration(remainingSeconds)
   };
 }
 
@@ -852,7 +819,7 @@ async function calculateShiftCases() {
     const remainingForMinTarget = Math.max(0, TARGETS.dailyCasesMin - closedCount);
     const remainingForMaxTarget = Math.max(0, TARGETS.dailyCasesMax - closedCount);
 
-    const remainingHours = elapsed.remainingWorkSeconds / 3600;
+    const remainingHours = elapsed.remainingSeconds / 3600;
 
     const requiredPaceMin =
       remainingHours > 0 ? remainingForMinTarget / remainingHours : remainingForMinTarget;
@@ -891,10 +858,9 @@ async function calculateShiftCases() {
       count: closedCount,
       shiftStatus: elapsed.shiftStatus,
       shiftLabel: window.label,
-      breakLabel: window.breakLabel,
-      workedElapsedText: elapsed.workedElapsedText,
-      totalWorkText: elapsed.totalWorkText,
-      remainingWorkText: elapsed.remainingWorkText,
+      elapsedText: elapsed.elapsedText,
+      totalText: elapsed.totalText,
+      remainingText: elapsed.remainingText,
       progressPercent: Math.round(elapsed.progress * 100),
       expectedMinByNow,
       expectedMaxByNow,
@@ -1128,12 +1094,12 @@ async function buildConversationData(conversationId) {
   };
 }
 
-function renderShiftComponents(shift) {
+function renderShiftSummary(shift) {
   if (!shift || !shift.available) {
     return [
       {
         type: "text",
-        text: "📊 Shift cases: unavailable"
+        text: "📊 Shift: unavailable"
       },
       {
         type: "text",
@@ -1145,27 +1111,15 @@ function renderShiftComponents(shift) {
   return [
     {
       type: "text",
-      text: `📊 Shift cases: ${shift.paceIcon} ${shift.count}/${TARGETS.dailyCasesMin} minimum`
+      text: `📊 Shift: ${shift.paceIcon} ${shift.count}/${TARGETS.dailyCasesMin} cases · ${shift.paceStatus}`
     },
     {
       type: "text",
-      text: `Pace: ${shift.paceStatus} · Expected now: ${shift.expectedMinByNow}–${shift.expectedMaxByNow}`
+      text: `Expected now: ${shift.expectedMinByNow}–${shift.expectedMaxByNow} · Needed: ${shift.remainingForMinTarget} for 30`
     },
     {
       type: "text",
-      text: `Shift: ${shift.shiftLabel} · Break: ${shift.breakLabel}`
-    },
-    {
-      type: "text",
-      text: `Worked: ${shift.workedElapsedText}/${shift.totalWorkText} · Remaining: ${shift.remainingWorkText}`
-    },
-    {
-      type: "text",
-      text: `Needed: ${shift.remainingForMinTarget} for 30 · ${shift.remainingForMaxTarget} for 50`
-    },
-    {
-      type: "text",
-      text: `Required pace: ${formatCasesPerHour(shift.requiredPaceMin)} for 30 · ${formatCasesPerHour(shift.requiredPaceMax)} for 50`
+      text: `Time: ${shift.elapsedText}/${shift.totalText} · Required pace: ${formatCasesPerHour(shift.requiredPaceMin)}`
     }
   ];
 }
@@ -1184,73 +1138,60 @@ function renderMainPanel(data, teammateName, conversationId) {
     },
     {
       type: "text",
-      text: `🎯 Metrics score: ${data.metricScore}`
-    },
-    {
-      type: "text",
-      text: `⚡ Action: ${data.recommendedAction}`
+      text: `🎯 Score: ${data.metricScore} · ${data.recommendedAction}`
     },
 
     {
       type: "text",
-      text: "—"
+      text: "━━━━━━━━━━━━━━━━"
     },
 
-    ...renderShiftComponents(data.shift),
-
-    {
-      type: "text",
-      text: "—"
-    },
+    ...renderShiftSummary(data.shift),
 
     {
       type: "text",
-      text: `⏱ FRT: ${data.frt.status}`
-    },
-    {
-      type: "text",
-      text: `👤 Current customer wait: ${data.currentWait.text}`
-    },
-    {
-      type: "text",
-      text: `🏁 First close: ${data.firstClose.status}`
+      text: "━━━━━━━━━━━━━━━━"
     },
 
     {
       type: "text",
-      text: "—"
+      text: `⏱ ${data.frt.label}: ${data.frt.status}`
+    },
+    {
+      type: "text",
+      text: `🏁 ${data.firstClose.label}: ${data.firstClose.status}`
+    },
+    {
+      type: "text",
+      text: `👤 Customer wait: ${data.currentWait.text}`
     },
 
     {
       type: "text",
-      text: `🧭 Topic: ${data.detectedTopic}`
-    },
-    {
-      type: "text",
-      text: `Next check: ${data.topicSuggestion}`
-    },
-    {
-      type: "text",
-      text: `Customer said: ${data.latestCustomerMessage}`
+      text: "━━━━━━━━━━━━━━━━"
     },
 
     {
       type: "text",
-      text: "—"
+      text: `🧭 ${data.detectedTopic} · ${data.topicSuggestion}`
+    },
+    {
+      type: "text",
+      text: `Customer: ${data.latestCustomerMessage}`
     },
 
     {
       type: "text",
-      text: `💬 Suggested reply: ${data.suggestedReply}`
-    },
-    {
-      type: "text",
-      text: `📝 Admin note: ${data.adminNote}`
+      text: "━━━━━━━━━━━━━━━━"
     },
 
     {
       type: "text",
-      text: "—"
+      text: `💬 Reply: ${data.suggestedReply}`
+    },
+    {
+      type: "text",
+      text: `📝 Note: ${data.adminNote}`
     },
 
     {
@@ -1265,7 +1206,7 @@ function renderMainPanel(data, teammateName, conversationId) {
     {
       type: "button",
       id: "refresh_metrics",
-      label: "Refresh metrics",
+      label: "Refresh",
       style: "secondary",
       action: {
         type: "submit"
@@ -1274,28 +1215,11 @@ function renderMainPanel(data, teammateName, conversationId) {
 
     {
       type: "text",
-      text: "—"
-    },
-
-    {
-      type: "text",
-      text: `Status: ${data.state} / ${data.open}`
+      text: `Status: ${data.state}/${data.open} · Teammate: ${teammateName}`
     },
     {
       type: "text",
-      text: `Teammate: ${teammateName}`
-    },
-    {
-      type: "text",
-      text: `Conversation: ${conversationId}`
-    },
-    {
-      type: "text",
-      text: `Targets: 30–50 cases/day · FRT <15m · First close <1h20m · CSAT 65%`
-    },
-    {
-      type: "text",
-      text: "Safety: sends only if open, assigned to James, and latest message is from customer."
+      text: `Targets: 30–50 cases · FRT <15m · Close <1h20m · CSAT 65%`
     }
   ]);
 }
@@ -1320,21 +1244,13 @@ function renderAckSentPanel(data, teammateName, conversationId) {
       text: `Message: ${data.frtAcknowledgement}`
     },
     {
-      type: "text",
-      text: "—"
-    },
-    {
       type: "button",
       id: "refresh_metrics",
-      label: "Refresh metrics",
+      label: "Refresh",
       style: "secondary",
       action: {
         type: "submit"
       }
-    },
-    {
-      type: "text",
-      text: `Teammate: ${teammateName}`
     },
     {
       type: "text",
@@ -1378,7 +1294,7 @@ function renderAckBlockedPanel(reason, conversationId) {
   ]);
 }
 
-async function renderJamesAssist(req, res) {
+async function renderAgentVue(req, res) {
   console.log("AgentVue render hit");
 
   const body = req.body || {};
@@ -1400,7 +1316,7 @@ async function renderJamesAssist(req, res) {
         },
         {
           type: "text",
-          text: "The app is connected, but Intercom did not send a conversation ID in this request."
+          text: "The app is connected, but Intercom did not send a conversation ID."
         }
       ])
     );
@@ -1452,15 +1368,15 @@ async function renderJamesAssist(req, res) {
         },
         {
           type: "text",
-          text: "Check Write conversations permission, INTERCOM_ACCESS_TOKEN, and JAMES_ADMIN_ID."
+          text: "Check permissions, INTERCOM_ACCESS_TOKEN, and JAMES_ADMIN_ID."
         }
       ])
     );
   }
 }
 
-app.post("/intercom/initialize", renderJamesAssist);
-app.post("/intercom/submit", renderJamesAssist);
+app.post("/intercom/initialize", renderAgentVue);
+app.post("/intercom/submit", renderAgentVue);
 
 const port = process.env.PORT || 3000;
 
