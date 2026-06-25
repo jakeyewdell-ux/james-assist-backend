@@ -1090,7 +1090,10 @@ async function buildConversationData(conversationId) {
   const frt = calculateFRT(conversation);
   const firstClose = calculateFirstClose(conversation);
   const currentWait = getCurrentCustomerWait(conversation);
-  const shift = await calculateShiftCases();
+  const shift = {
+  available: false,
+  error: "Shift tracker temporarily disabled to keep AgentVue loading quickly."
+  };
 
   const latestCustomerMessage = getLatestCustomerMessage(conversation);
   const detectedTopic = detectTopic(latestCustomerMessage);
