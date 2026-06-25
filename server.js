@@ -24,9 +24,9 @@ app.get("/", (req, res) => {
  * - CSAT: 65%
  *
  * Shift tracking:
- * - Counts all cases closed by James between 00:00–08:00 ICT
- * - Breaks are NOT excluded from the closed case count
- * - Counts close events, not updated_at only
+ * - Counts closed cases assigned to James between 00:00–08:00 ICT
+ * - Breaks are NOT excluded
+ * - Fast mode is used so Intercom does not hang
  */
 const TARGETS = {
   frtSeconds: 15 * 60,
@@ -51,7 +51,6 @@ function formatDuration(seconds) {
   const minutes = Math.floor(seconds / 60);
 
   if (minutes < 1) return "Under 1 min";
-
   if (minutes < 60) return `${minutes} min`;
 
   const hours = Math.floor(minutes / 60);
@@ -84,7 +83,7 @@ function stripHtml(input) {
     .trim();
 }
 
-function truncateText(text, maxLength = 120) {
+function truncateText(text, maxLength = 100) {
   if (!text) return "No message preview found.";
   if (text.length <= maxLength) return text;
   return `${text.substring(0, maxLength)}...`;
@@ -121,10 +120,14 @@ function getLatestConversationItem(conversation) {
 
   const items = [];
 
-  if (sourceItem?.created_at) items.push(sourceItem);
+  if (sourceItem?.created_at) {
+    items.push(sourceItem);
+  }
 
   for (const part of parts) {
-    if (part.created_at) items.push(part);
+    if (part.created_at) {
+      items.push(part);
+    }
   }
 
   if (items.length === 0) return null;
@@ -422,9 +425,9 @@ function getTopicSuggestion(topic, frt, firstClose) {
   if (firstClose.risk === "High") return "Prioritise resolution or close if solved.";
 
   if (topic === "Payments / payouts") return "Check payout/payment status.";
-  if (topic === "Verification") return "Check verification status and document guidance.";
+  if (topic === "Verification") return "Check verification/document guidance.";
   if (topic === "Billing / subscription") return "Check billing/subscription context.";
-  if (topic === "Account access") return "Check account status and access history.";
+  if (topic === "Account access") return "Check account status/access history.";
   if (topic === "Content / uploads") return "Check content/upload context.";
 
   return "Review and use the relevant support process.";
@@ -440,7 +443,7 @@ function buildSuggestedReply(topic, latestCustomerMessage, frt) {
   }
 
   if (topic === "Payments / payouts") {
-    return "Hey there, thanks so much for reaching out! I’m really sorry for the worry here. I’ll take a look into the payout/payment details for you now and help get this checked as quickly as possible. 💚";
+    return "Hey there, thanks so much for reaching out! I’m really sorry for the worry here. I’ll check the payout/payment details for you now. 💚";
   }
 
   if (topic === "Verification") {
@@ -448,15 +451,15 @@ function buildSuggestedReply(topic, latestCustomerMessage, frt) {
   }
 
   if (topic === "Billing / subscription") {
-    return "Hey there, thanks so much for reaching out! I’m sorry for any confusion here. I’ll review the billing/subscription details and help get this looked into for you. 💚";
+    return "Hey there, thanks so much for reaching out! I’m sorry for any confusion here. I’ll review the billing/subscription details for you. 💚";
   }
 
   if (topic === "Account access") {
-    return "Hey there, thanks so much for reaching out! I’m sorry you’re having trouble accessing your account. I’ll take a look and help guide you through the next steps. 💚";
+    return "Hey there, thanks so much for reaching out! I’m sorry you’re having trouble accessing your account. I’ll check this for you now. 💚";
   }
 
   if (topic === "Content / uploads") {
-    return "Hey there, thanks so much for reaching out! I’ll check what’s happening with the content/upload issue and help get this looked into for you. 💚";
+    return "Hey there, thanks so much for reaching out! I’ll check the content/upload issue and help get this looked into. 💚";
   }
 
   return "Hey there, thanks so much for reaching out! I’ll take a look into this for you now and help get this sorted. 💚";
@@ -472,23 +475,23 @@ function buildFTRAcknowledgement(topic, frt) {
   }
 
   if (topic === "Payments / payouts") {
-    return "Hey there, thanks so much for reaching out! I’m checking the payout/payment details for you now and will help get this looked into as quickly as possible. 💚";
+    return "Hey there, thanks so much for reaching out! I’m checking the payout/payment details for you now. 💚";
   }
 
   if (topic === "Verification") {
-    return "Hey there, thanks so much for reaching out! I’m checking the verification details for you now and will help confirm the next steps. 💚";
+    return "Hey there, thanks so much for reaching out! I’m checking the verification details for you now. 💚";
   }
 
   if (topic === "Billing / subscription") {
-    return "Hey there, thanks so much for reaching out! I’m checking the billing/subscription details for you now and will help get this looked into. 💚";
+    return "Hey there, thanks so much for reaching out! I’m checking the billing/subscription details for you now. 💚";
   }
 
   if (topic === "Account access") {
-    return "Hey there, thanks so much for reaching out! I’m checking the account access details for you now and will help with the next steps. 💚";
+    return "Hey there, thanks so much for reaching out! I’m checking the account access details for you now. 💚";
   }
 
   if (topic === "Content / uploads") {
-    return "Hey there, thanks so much for reaching out! I’m checking the content/upload details for you now and will help get this looked into. 💚";
+    return "Hey there, thanks so much for reaching out! I’m checking the content/upload details for you now. 💚";
   }
 
   return "Hey there, thanks so much for reaching out! I’m checking this for you now and will help get this sorted. 💚";
@@ -558,7 +561,7 @@ function getRecommendedAction(conversation, frt, firstClose, currentWait, shift)
   if (firstClose.risk === "Medium") return "Move toward resolution.";
 
   if (shift && shift.available && shift.paceStatus === "Behind") {
-    return `Push close-ready cases — ${shift.remainingForMinTarget} more needed for 30.`;
+    return `Push close-ready cases — ${shift.remainingForMinTarget} more needed.`;
   }
 
   if (shift && shift.available && shift.paceStatus === "Slightly behind") {
@@ -694,152 +697,81 @@ async function fetchIntercomConversation(conversationId) {
 
 async function searchCandidateConversationsForShift(shiftStart, shiftEnd) {
   const token = process.env.INTERCOM_ACCESS_TOKEN;
+  const adminId = process.env.JAMES_ADMIN_ID;
 
   if (!token) {
     throw new Error("Missing INTERCOM_ACCESS_TOKEN environment variable");
   }
 
-  const all = [];
-  let startingAfter = null;
+  if (!adminId) {
+    throw new Error("Missing JAMES_ADMIN_ID environment variable");
+  }
 
-  for (let page = 0; page < 5; page += 1) {
-    const pagination = {
-      per_page: 100
-    };
-
-    if (startingAfter) {
-      pagination.starting_after = startingAfter;
-    }
-
-    const response = await fetch("https://api.intercom.io/conversations/search", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "Intercom-Version": "2.11"
+  const response = await fetch("https://api.intercom.io/conversations/search", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "Intercom-Version": "2.11"
+    },
+    body: JSON.stringify({
+      query: {
+        operator: "AND",
+        value: [
+          {
+            field: "state",
+            operator: "=",
+            value: "closed"
+          },
+          {
+            field: "admin_assignee_id",
+            operator: "=",
+            value: String(adminId)
+          },
+          {
+            field: "updated_at",
+            operator: ">",
+            value: shiftStart
+          },
+          {
+            field: "updated_at",
+            operator: "<",
+            value: shiftEnd
+          }
+        ]
       },
-      body: JSON.stringify({
-        query: {
-          operator: "AND",
-          value: [
-            {
-              field: "updated_at",
-              operator: ">",
-              value: shiftStart - 2 * 60 * 60
-            },
-            {
-              field: "updated_at",
-              operator: "<",
-              value: shiftEnd + 2 * 60 * 60
-            }
-          ]
-        },
-        pagination
-      })
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Intercom shift search error ${response.status}: ${errorText}`);
-    }
-
-    const data = await response.json();
-    const conversations = data.conversations || [];
-
-    all.push(...conversations);
-
-    const nextPage = data.pages?.next;
-    const nextStartingAfter = nextPage?.starting_after;
-
-    if (!nextStartingAfter) break;
-
-    startingAfter = nextStartingAfter;
-  }
-
-  return all;
-}
-
-function isJamesAdmin(author) {
-  const jamesAdminId = String(process.env.JAMES_ADMIN_ID || "");
-
-  if (!jamesAdminId || !author) return false;
-
-  return String(author.id || "") === jamesAdminId;
-}
-
-function getJamesCloseEvents(conversation) {
-  const parts = getAllConversationParts(conversation);
-
-  return parts.filter((part) => {
-    const type = String(part.part_type || part.type || "").toLowerCase();
-
-    const looksLikeClose =
-      type.includes("close") ||
-      type === "conversation_closed" ||
-      type === "closed";
-
-    return (
-      looksLikeClose &&
-      part.created_at &&
-      isJamesAdmin(part.author)
-    );
+      pagination: {
+        per_page: 100
+      }
+    })
   });
-}
 
-function getFallbackCloseTimeIfLikelyJames(conversation) {
-  const jamesAdminId = String(process.env.JAMES_ADMIN_ID || "");
-  const assignedAdminId = String(conversation.admin_assignee_id || "");
-
-  if (!jamesAdminId || assignedAdminId !== jamesAdminId) {
-    return null;
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Intercom shift search error ${response.status}: ${errorText}`);
   }
 
-  return (
-    conversation.statistics?.last_close_at ||
-    conversation.statistics?.first_close_at ||
-    conversation.closed_at ||
-    null
-  );
+  const data = await response.json();
+
+  return data.conversations || [];
 }
 
 async function countJamesClosedCasesThisShift(shiftStart, shiftEnd) {
   const candidates = await searchCandidateConversationsForShift(shiftStart, shiftEnd);
+
+  /*
+    Fast safe mode:
+    Count closed conversations assigned to James in the 00:00–08:00 ICT window.
+
+    This avoids slow full-conversation scanning that can make Intercom hang.
+    It is a practical estimate based on Intercom search, not a deep close-event audit.
+  */
   const countedConversationIds = new Set();
 
   for (const item of candidates) {
-    const conversationId = item.id;
-
-    if (!conversationId) continue;
-
-    let fullConversation;
-
-    try {
-      fullConversation = await fetchIntercomConversation(conversationId);
-    } catch (error) {
-      console.error(`Could not fetch conversation ${conversationId}:`, error.message);
-      continue;
-    }
-
-    const closeEvents = getJamesCloseEvents(fullConversation);
-
-    const jamesClosedInsideShift = closeEvents.some((event) => {
-      return event.created_at >= shiftStart && event.created_at < shiftEnd;
-    });
-
-    if (jamesClosedInsideShift) {
-      countedConversationIds.add(conversationId);
-      continue;
-    }
-
-    const fallbackCloseTime = getFallbackCloseTimeIfLikelyJames(fullConversation);
-
-    if (
-      fallbackCloseTime &&
-      fallbackCloseTime >= shiftStart &&
-      fallbackCloseTime < shiftEnd
-    ) {
-      countedConversationIds.add(conversationId);
+    if (item.id) {
+      countedConversationIds.add(item.id);
     }
   }
 
@@ -1113,8 +1045,7 @@ async function buildConversationData(conversationId) {
 
   const frtAcknowledgement = buildFTRAcknowledgement(
     detectedTopic,
-    frt,
-    currentWait
+    frt
   );
 
   const adminNote = buildAdminNote(detectedTopic, latestCustomerMessage);
@@ -1148,7 +1079,7 @@ function renderShiftSummary(shift) {
     return [
       {
         type: "text",
-        text: `📊 Shift: unavailable — ${shift?.error || "Unknown error"}`
+        text: "📊 Cases: unavailable"
       }
     ];
   }
@@ -1160,7 +1091,7 @@ function renderShiftSummary(shift) {
     },
     {
       type: "text",
-      text: `Expected: ${shift.expectedMinByNow}–${shift.expectedMaxByNow} · Left: ${shift.remainingForMinTarget} · Pace: ${formatCasesPerHour(shift.requiredPaceMin)}`
+      text: `Expected ${shift.expectedMinByNow}–${shift.expectedMaxByNow} · Left ${shift.remainingForMinTarget} · ${formatCasesPerHour(shift.requiredPaceMin)} needed`
     }
   ];
 }
